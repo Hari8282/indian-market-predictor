@@ -1,0 +1,1492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+    <meta name="theme-color" content="#0a0e27">
+    <title>Indian Market - Trading Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        html {
+            -webkit-text-size-adjust: 100%;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 50%, #0a0e27 100%);
+            color: #ffffff;
+            min-height: 100vh;
+            padding: 0;
+            overflow-x: hidden;
+        }
+
+        .main-container {
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Mobile Menu Toggle */
+        .mobile-menu-btn {
+            display: none;
+            position: fixed;
+            top: 12px;
+            left: 12px;
+            z-index: 1001;
+            background: rgba(139, 92, 246, 0.9);
+            border: none;
+            color: white;
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            font-size: 20px;
+            cursor: pointer;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+
+        .mobile-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.6);
+            z-index: 999;
+        }
+
+        .mobile-overlay.show {
+            display: block;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 300px;
+            min-width: 300px;
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border-right: 1px solid rgba(255, 255, 255, 0.1);
+            overflow-y: auto;
+            padding: 20px;
+            transition: transform 0.3s ease;
+        }
+
+        .logo {
+            font-size: 22px;
+            font-weight: bold;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #fff;
+            flex-wrap: wrap;
+        }
+
+        .live-badge {
+            background: #ef4444;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 10px;
+            animation: pulse 2s infinite;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .live-dot {
+            width: 6px;
+            height: 6px;
+            background: white;
+            border-radius: 50%;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        .section {
+            margin-bottom: 20px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            padding: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .section-title {
+            font-size: 11px;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+
+        .price-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 10px;
+            border-left: 3px solid;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .price-card:active {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .price-card.bullish {
+            border-left-color: #10b981;
+        }
+
+        .price-card.bearish {
+            border-left-color: #ef4444;
+        }
+
+        .price-label {
+            font-size: 10px;
+            color: #94a3b8;
+            margin-bottom: 4px;
+        }
+
+        .price-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #fff;
+            margin-bottom: 4px;
+            word-break: break-word;
+        }
+
+        .price-change {
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .bullish-text {
+            color: #10b981;
+        }
+
+        .bearish-text {
+            color: #ef4444;
+        }
+
+        .global-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            gap: 8px;
+        }
+
+        .global-item:last-child {
+            border-bottom: none;
+        }
+
+        .global-name {
+            font-size: 11px;
+            color: #cbd5e1;
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .global-change {
+            font-size: 11px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .prediction-box {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(236, 72, 153, 0.2));
+            border-radius: 12px;
+            padding: 15px;
+            border: 1px solid rgba(139, 92, 246, 0.3);
+        }
+
+        .prediction-direction {
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        .confidence-bar {
+            width: 100%;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
+        .confidence-fill {
+            height: 100%;
+            transition: width 0.5s;
+        }
+
+        .signal-list {
+            margin-top: 10px;
+        }
+
+        .signal-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            font-size: 11px;
+            gap: 8px;
+        }
+
+        .signal-badge {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 9px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .signal-badge.bullish {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+
+        .signal-badge.bearish {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+
+        .signal-badge.neutral {
+            background: rgba(251, 191, 36, 0.2);
+            color: #fbbf24;
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            min-width: 0;
+        }
+
+        .header-bar {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .status-items {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #10b981;
+            flex-shrink: 0;
+        }
+
+        .status-indicator.loading {
+            background: #fbbf24;
+            animation: blink 1s infinite;
+        }
+
+        .status-indicator.error {
+            background: #ef4444;
+        }
+
+        .btn {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            padding: 10px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            justify-content: center;
+        }
+
+        .btn:active {
+            background: rgba(59, 130, 246, 0.4);
+            transform: scale(0.98);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn.active {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .chart-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            margin-bottom: 20px;
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .chart-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .chart-subtitle {
+            font-size: 11px;
+            color: #94a3b8;
+            margin-top: 4px;
+            line-height: 1.4;
+        }
+
+        .chart-controls {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            width: 100%;
+        }
+
+        .chart-btn {
+            background: rgba(255, 255, 255, 0.05);
+            color: #cbd5e1;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: 600;
+            transition: all 0.3s;
+            flex: 1;
+            min-width: 70px;
+            white-space: nowrap;
+        }
+
+        .chart-btn:active {
+            transform: scale(0.96);
+        }
+
+        .chart-btn.active {
+            background: #8b5cf6;
+            color: white;
+            border-color: #8b5cf6;
+        }
+
+        .timeframe-bar {
+            display: flex;
+            gap: 6px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            margin-bottom: 15px;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .timeframe-btn {
+            background: rgba(255, 255, 255, 0.05);
+            color: #cbd5e1;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 10px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.3s;
+            flex-shrink: 0;
+            min-width: 55px;
+            text-align: center;
+        }
+
+        .timeframe-btn:active {
+            transform: scale(0.96);
+        }
+
+        .timeframe-btn.active {
+            background: linear-gradient(135deg, #8b5cf6, #ec4899);
+            color: white;
+            border-color: transparent;
+            box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+        }
+
+        .chart-wrapper {
+            width: 100%;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            border-radius: 10px;
+        }
+
+        canvas {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            display: block;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            touch-action: pan-y pinch-zoom;
+        }
+
+        .indicators-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .indicator-card {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border-radius: 12px;
+            padding: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s;
+        }
+
+        .indicator-label {
+            font-size: 10px;
+            color: #94a3b8;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+        }
+
+        .indicator-value {
+            font-size: 17px;
+            font-weight: bold;
+            color: #fff;
+            margin-bottom: 6px;
+            word-break: break-word;
+        }
+
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+            flex-direction: column;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .loading-overlay.show {
+            display: flex;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top: 4px solid #8b5cf6;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            color: white;
+            margin-top: 20px;
+            font-size: 16px;
+        }
+
+        .scrollbar-hide::-webkit-scrollbar {
+            width: 4px;
+            height: 4px;
+        }
+
+        .scrollbar-hide::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .scrollbar-hide::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+        }
+
+        .config-banner {
+            background: rgba(251, 191, 36, 0.15);
+            border: 1px solid rgba(251, 191, 36, 0.4);
+            border-radius: 10px;
+            padding: 12px 15px;
+            margin-bottom: 15px;
+            font-size: 12px;
+            color: #fcd34d;
+            display: none;
+        }
+
+        .config-banner.show {
+            display: block;
+        }
+
+        .config-banner input {
+            background: rgba(0,0,0,0.4);
+            border: 1px solid rgba(251, 191, 36, 0.4);
+            color: white;
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            width: 100%;
+            margin-top: 8px;
+        }
+
+        /* Tablet */
+        @media (max-width: 1024px) {
+            .sidebar {
+                width: 260px;
+                min-width: 260px;
+            }
+        }
+
+        /* Mobile */
+        @media (max-width: 768px) {
+            .mobile-menu-btn {
+                display: flex;
+            }
+
+            .main-container {
+                position: relative;
+            }
+
+            .sidebar {
+                position: fixed;
+                top: 0;
+                left: 0;
+                height: 100%;
+                z-index: 1000;
+                transform: translateX(-100%);
+                width: 280px;
+                min-width: 280px;
+                box-shadow: 10px 0 30px rgba(0,0,0,0.5);
+            }
+
+            .sidebar.open {
+                transform: translateX(0);
+            }
+
+            .main-content {
+                padding: 12px;
+                padding-top: 65px;
+                width: 100%;
+            }
+
+            .header-bar {
+                padding: 12px 15px;
+            }
+
+            .status-items {
+                gap: 10px;
+                width: 100%;
+                justify-content: space-between;
+            }
+
+            .status-item {
+                font-size: 10px;
+            }
+
+            .indicators-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 8px;
+            }
+
+            .indicator-card {
+                padding: 10px;
+            }
+
+            .indicator-value {
+                font-size: 15px;
+            }
+
+            .chart-section {
+                padding: 12px;
+            }
+
+            .chart-title {
+                font-size: 14px;
+            }
+
+            .chart-subtitle {
+                font-size: 10px;
+            }
+
+            .chart-controls {
+                gap: 5px;
+            }
+
+            .chart-btn {
+                padding: 8px 10px;
+                font-size: 10px;
+                min-width: 60px;
+            }
+
+            canvas {
+                width: 700px !important;
+                height: 380px !important;
+            }
+
+            .timeframe-btn {
+                padding: 8px 12px;
+                font-size: 11px;
+                min-width: 48px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .main-content {
+                padding: 10px;
+                padding-top: 60px;
+            }
+
+            .logo {
+                font-size: 18px;
+            }
+
+            .indicators-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            canvas {
+                width: 600px !important;
+                height: 320px !important;
+            }
+
+            .price-value {
+                font-size: 16px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Loading Market Data...</div>
+        <div style="color: #94a3b8; margin-top: 10px; font-size: 13px;" id="loadingStatus">Connecting to server...</div>
+    </div>
+
+    <button class="mobile-menu-btn" id="mobileMenuBtn" onclick="toggleMobileMenu()">☰</button>
+    <div class="mobile-overlay" id="mobileOverlay" onclick="closeMobileMenu()"></div>
+
+    <div class="main-container">
+        <!-- Sidebar -->
+        <div class="sidebar scrollbar-hide" id="sidebar">
+            <div class="logo">
+                📊 Market Hub
+                <span class="live-badge">
+                    <span class="live-dot"></span>
+                    LIVE
+                </span>
+            </div>
+
+            <!-- Backend Config Banner -->
+            <div class="config-banner" id="configBanner">
+                ⚠️ Backend not connected. Enter your API URL:
+                <input type="text" id="apiUrlInput" placeholder="https://your-backend.onrender.com" />
+                <button class="btn" style="width: 100%; margin-top: 8px;" onclick="saveApiUrl()">Save & Connect</button>
+            </div>
+
+            <!-- Indian Indices -->
+            <div class="section">
+                <div class="section-title">📈 Indian Markets</div>
+                <div class="price-card bullish" id="niftyCard">
+                    <div class="price-label">NIFTY 50</div>
+                    <div class="price-value">--</div>
+                    <div class="price-change">--</div>
+                </div>
+                <div class="price-card bearish" id="bankNiftyCard">
+                    <div class="price-label">BANK NIFTY</div>
+                    <div class="price-value">--</div>
+                    <div class="price-change">--</div>
+                </div>
+            </div>
+
+            <!-- Prediction -->
+            <div class="section">
+                <div class="section-title">🎯 Market Prediction</div>
+                <div class="prediction-box" id="predictionBox">
+                    <div class="prediction-direction" id="predictionDirection">--</div>
+                    <div style="font-size: 12px; color: #cbd5e1; margin-bottom: 5px;">
+                        Confidence: <strong id="predictionConfidence">--</strong>
+                    </div>
+                    <div class="confidence-bar">
+                        <div class="confidence-fill" id="confidenceFill" style="width: 0%; background: #8b5cf6;"></div>
+                    </div>
+
+                    <div id="cprInfo" style="background: rgba(139, 92, 246, 0.15); padding: 10px; border-radius: 8px; margin-top: 12px; border: 1px solid rgba(139, 92, 246, 0.3);">
+                        <div style="font-size: 11px; color: #c4b5fd;">Loading CPR info...</div>
+                    </div>
+
+                    <div class="section-title" style="margin-top: 15px; margin-bottom: 8px;">📋 Analysis Factors</div>
+                    <div class="signal-list" id="signalList">
+                        <div class="signal-item">
+                            <span>Loading...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Global Markets -->
+            <div class="section">
+                <div class="section-title">🌍 Global Markets</div>
+                <div id="globalMarketsList">
+                    <div class="global-item">
+                        <span class="global-name">Loading...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Controls -->
+            <div class="section">
+                <div class="section-title">⚙️ Controls</div>
+                <button class="btn" onclick="fetchMarketData()" id="refreshBtn" style="width: 100%; margin-bottom: 8px;">
+                    <span id="refreshIcon">🔄</span>
+                    <span>Refresh Data</span>
+                </button>
+                <button class="btn" onclick="toggleAutoRefresh()" id="autoRefreshBtn" style="width: 100%;">
+                    <span>⏱️</span>
+                    <span id="autoRefreshText">Auto-Refresh: OFF</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-content scrollbar-hide" id="mainContent">
+            <!-- Header Bar -->
+            <div class="header-bar">
+                <div class="status-items">
+                    <div class="status-item">
+                        <div class="status-indicator" id="statusIndicator"></div>
+                        <span id="connectionStatus">Connecting...</span>
+                    </div>
+                    <div class="status-item">
+                        <span>🕐 <strong id="currentTime">--:--:--</strong></span>
+                    </div>
+                    <div class="status-item">
+                        <span>📅 <strong id="lastUpdate">--</strong></span>
+                    </div>
+                    <div class="status-item">
+                        <span style="color: #94a3b8;">Next: <strong id="countdown">--</strong></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Technical Indicators -->
+            <div class="indicators-grid" id="indicatorsGrid">
+                <div class="indicator-card">
+                    <div class="indicator-label">Loading...</div>
+                    <div class="indicator-value">--</div>
+                </div>
+            </div>
+
+            <!-- Chart Section -->
+            <div class="chart-section">
+                <div class="chart-header">
+                    <div>
+                        <div class="chart-title" id="chartTitle">📊 Nifty 50 - 15 Minutes</div>
+                        <div class="chart-subtitle" id="chartSubtitle">Loading chart data...</div>
+                    </div>
+                    <div class="chart-controls">
+                        <button class="chart-btn active" onclick="switchChart('nifty')" id="btnNifty">Nifty 50</button>
+                        <button class="chart-btn" onclick="switchChart('banknifty')" id="btnBankNifty">Bank Nifty</button>
+                        <button class="chart-btn active" onclick="toggleCPR()" id="btnCPR">CPR</button>
+                        <button class="chart-btn active" onclick="toggleSR()" id="btnSR">S/R</button>
+                        <button class="chart-btn active" onclick="toggleVolume()" id="btnVolume">Vol</button>
+                    </div>
+                </div>
+
+                <!-- Timeframe Selector -->
+                <div class="timeframe-bar">
+                    <button class="timeframe-btn" onclick="changeTimeframe('1m')" data-tf="1m">1M</button>
+                    <button class="timeframe-btn" onclick="changeTimeframe('5m')" data-tf="5m">5M</button>
+                    <button class="timeframe-btn active" onclick="changeTimeframe('15m')" data-tf="15m">15M</button>
+                    <button class="timeframe-btn" onclick="changeTimeframe('30m')" data-tf="30m">30M</button>
+                    <button class="timeframe-btn" onclick="changeTimeframe('1h')" data-tf="1h">1H</button>
+                    <button class="timeframe-btn" onclick="changeTimeframe('1d')" data-tf="1d">1D</button>
+                    <button class="timeframe-btn" onclick="changeTimeframe('1wk')" data-tf="1wk">1W</button>
+                </div>
+
+                <div class="chart-wrapper">
+                    <canvas id="chartCanvas"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let marketData = null;
+        let currentChart = 'nifty';
+        let currentTimeframe = '15m';
+        let showCPR = true;
+        let showSR = true;
+        let showVolume = true;
+        let autoRefresh = false;
+        let refreshInterval = null;
+        let countdownInterval = null;
+        let secondsRemaining = 60;
+        const REFRESH_SECONDS = 60;
+        
+        // API URL - Configurable for deployment
+        // Change this to your deployed backend URL (e.g., Render, Railway)
+        let API_BASE_URL = localStorage.getItem('apiBaseUrl') || 'http://localhost:5000';
+        
+        function getApiUrl() {
+            return `${API_BASE_URL}/api/market-data`;
+        }
+
+        // Mobile menu
+        function toggleMobileMenu() {
+            document.getElementById('sidebar').classList.toggle('open');
+            document.getElementById('mobileOverlay').classList.toggle('show');
+        }
+
+        function closeMobileMenu() {
+            document.getElementById('sidebar').classList.remove('open');
+            document.getElementById('mobileOverlay').classList.remove('show');
+        }
+
+        function saveApiUrl() {
+            const url = document.getElementById('apiUrlInput').value.trim();
+            if (url) {
+                API_BASE_URL = url.replace(/\/$/, '');
+                localStorage.setItem('apiBaseUrl', API_BASE_URL);
+                document.getElementById('configBanner').classList.remove('show');
+                fetchMarketData();
+            }
+        }
+
+        // Update clock
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('currentTime').textContent = now.toLocaleTimeString();
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        // Change timeframe
+        function changeTimeframe(tf) {
+            currentTimeframe = tf;
+            
+            document.querySelectorAll('.timeframe-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.getAttribute('data-tf') === tf) {
+                    btn.classList.add('active');
+                }
+            });
+            
+            fetchMarketData();
+            if (window.innerWidth <= 768) closeMobileMenu();
+        }
+
+        // Auto-refresh
+        function toggleAutoRefresh() {
+            autoRefresh = !autoRefresh;
+            const btn = document.getElementById('autoRefreshBtn');
+            const text = document.getElementById('autoRefreshText');
+            
+            if (autoRefresh) {
+                btn.classList.add('active');
+                text.textContent = 'Auto-Refresh: ON';
+                startAutoRefresh();
+            } else {
+                btn.classList.remove('active');
+                text.textContent = 'Auto-Refresh: OFF';
+                stopAutoRefresh();
+            }
+        }
+
+        function startAutoRefresh() {
+            secondsRemaining = REFRESH_SECONDS;
+            updateCountdown();
+            
+            refreshInterval = setInterval(() => {
+                fetchMarketData();
+            }, REFRESH_SECONDS * 1000);
+            
+            countdownInterval = setInterval(() => {
+                secondsRemaining--;
+                if (secondsRemaining < 0) {
+                    secondsRemaining = REFRESH_SECONDS;
+                }
+                updateCountdown();
+            }, 1000);
+        }
+
+        function stopAutoRefresh() {
+            if (refreshInterval) clearInterval(refreshInterval);
+            if (countdownInterval) clearInterval(countdownInterval);
+            document.getElementById('countdown').textContent = '--';
+        }
+
+        function updateCountdown() {
+            if (autoRefresh) {
+                document.getElementById('countdown').textContent = `${secondsRemaining}s`;
+            }
+        }
+
+        // Fetch market data
+        async function fetchMarketData() {
+            const loadingOverlay = document.getElementById('loadingOverlay');
+            const loadingStatus = document.getElementById('loadingStatus');
+            const refreshBtn = document.getElementById('refreshBtn');
+            const statusIndicator = document.getElementById('statusIndicator');
+            const connectionStatus = document.getElementById('connectionStatus');
+            
+            if (!autoRefresh) {
+                loadingOverlay.classList.add('show');
+            }
+            
+            loadingStatus.textContent = `Fetching ${currentTimeframe.toUpperCase()} data...`;
+            refreshBtn.disabled = true;
+            statusIndicator.classList.add('loading');
+            connectionStatus.textContent = 'Fetching...';
+
+            try {
+                const response = await fetch(`${getApiUrl()}?timeframe=${currentTimeframe}`);
+                
+                if (!response.ok) {
+                    throw new Error('Backend not responding');
+                }
+                
+                marketData = await response.json();
+                
+                statusIndicator.classList.remove('loading', 'error');
+                connectionStatus.textContent = 'Connected';
+                document.getElementById('configBanner').classList.remove('show');
+                
+                updateUI();
+                
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+                    
+                if (autoRefresh) {
+                    secondsRemaining = REFRESH_SECONDS;
+                }
+                
+            } catch (error) {
+                console.error('Error:', error);
+                statusIndicator.classList.remove('loading');
+                statusIndicator.classList.add('error');
+                connectionStatus.textContent = 'Backend Offline';
+                document.getElementById('configBanner').classList.add('show');
+                
+            } finally {
+                loadingOverlay.classList.remove('show');
+                refreshBtn.disabled = false;
+            }
+        }
+
+        // Update UI
+        function updateUI() {
+            if (!marketData) return;
+            
+            updatePriceCards();
+            updatePrediction();
+            updateGlobalMarkets();
+            updateIndicators();
+            updateChart();
+        }
+
+        function updatePriceCards() {
+            const nifty = marketData.nifty;
+            const bankNifty = marketData.bankNifty;
+            
+            const niftyCard = document.getElementById('niftyCard');
+            niftyCard.className = `price-card ${nifty.change > 0 ? 'bullish' : 'bearish'}`;
+            niftyCard.innerHTML = `
+                <div class="price-label">NIFTY 50</div>
+                <div class="price-value">₹${parseFloat(nifty.current).toLocaleString()}</div>
+                <div class="price-change ${nifty.change > 0 ? 'bullish-text' : 'bearish-text'}">
+                    ${nifty.change > 0 ? '▲' : '▼'} ${Math.abs(nifty.change)} (${nifty.changePercent}%)
+                </div>
+            `;
+            
+            const bankNiftyCard = document.getElementById('bankNiftyCard');
+            bankNiftyCard.className = `price-card ${bankNifty.change > 0 ? 'bullish' : 'bearish'}`;
+            bankNiftyCard.innerHTML = `
+                <div class="price-label">BANK NIFTY</div>
+                <div class="price-value">₹${parseFloat(bankNifty.current).toLocaleString()}</div>
+                <div class="price-change ${bankNifty.change > 0 ? 'bullish-text' : 'bearish-text'}">
+                    ${bankNifty.change > 0 ? '▲' : '▼'} ${Math.abs(bankNifty.change)} (${bankNifty.changePercent}%)
+                </div>
+            `;
+        }
+
+        function updatePrediction() {
+            const pred = marketData.prediction;
+            const signals = pred.signals || {};
+            const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
+            const cprBasis = market.cpr?.basis || 'Daily';
+            const cprPeriod = market.cpr?.period_label || 'N/A';
+            
+            const dirEl = document.getElementById('predictionDirection');
+            dirEl.className = `prediction-direction ${pred.direction === 'bullish' ? 'bullish-text' : pred.direction === 'bearish' ? 'bearish-text' : ''}`;
+            dirEl.textContent = pred.direction === 'bullish' ? '📈 BULLISH' : pred.direction === 'bearish' ? '📉 BEARISH' : '➡️ NEUTRAL';
+            
+            document.getElementById('predictionConfidence').textContent = `${pred.confidence}%`;
+            const fillEl = document.getElementById('confidenceFill');
+            fillEl.style.width = `${pred.confidence}%`;
+            fillEl.style.background = pred.confidence > 70 ? '#10b981' : pred.confidence > 50 ? '#fbbf24' : '#ef4444';
+            
+            const cprInfoEl = document.getElementById('cprInfo');
+            if (cprInfoEl) {
+                cprInfoEl.innerHTML = `
+                    <div style="font-size: 11px; color: #c4b5fd; margin-bottom: 8px;">
+                        📊 <strong>${cprBasis} CPR</strong> | ${cprPeriod}
+                    </div>
+                    <div style="display: flex; gap: 10px; font-size: 11px; color: #94a3b8; flex-wrap: wrap;">
+                        <span>PP: ₹${market.cpr.pivot}</span>
+                        <span>TC: ₹${market.cpr.tc}</span>
+                        <span>BC: ₹${market.cpr.bc}</span>
+                    </div>
+                `;
+            }
+            
+            const signalDescriptions = {
+                'rsi': 'RSI Indicator',
+                'sma': 'Moving Average',
+                'macd': 'MACD Signal',
+                'momentum': 'Price Momentum',
+                'global': 'Global Markets'
+            };
+            
+            let signalsHTML = '';
+            for (const [key, value] of Object.entries(signals)) {
+                signalsHTML += `
+                    <div class="signal-item">
+                        <span style="color: #cbd5e1;">${signalDescriptions[key] || key}</span>
+                        <span class="signal-badge ${value}">${value.toUpperCase()}</span>
+                    </div>
+                `;
+            }
+            document.getElementById('signalList').innerHTML = signalsHTML;
+        }
+
+        function updateGlobalMarkets() {
+            const markets = marketData.globalMarkets;
+            let html = '';
+            
+            const allMarkets = [
+                ...markets.asian.map(m => ({...m, region: '🌏'})),
+                ...markets.us.map(m => ({...m, region: '🇺🇸'})),
+                ...markets.european.map(m => ({...m, region: '🇪🇺'}))
+            ];
+            
+            allMarkets.forEach(market => {
+                html += `
+                    <div class="global-item">
+                        <span class="global-name">${market.region} ${market.name}</span>
+                        <span class="global-change ${market.change > 0 ? 'bullish-text' : 'bearish-text'}">
+                            ${market.change > 0 ? '▲' : '▼'} ${Math.abs(market.change).toFixed(2)}%
+                        </span>
+                    </div>
+                `;
+            });
+            
+            document.getElementById('globalMarketsList').innerHTML = html;
+        }
+
+        function updateIndicators() {
+            const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
+            const indicators = market.indicators || {};
+            const signals = marketData.prediction?.signals || {};
+            const cprBasis = market.cpr?.basis || 'Daily';
+            
+            let html = '';
+            
+            html += `
+                <div class="indicator-card" style="background: rgba(139, 92, 246, 0.15); border-color: rgba(139, 92, 246, 0.3);">
+                    <div class="indicator-label">${cprBasis} CPR</div>
+                    <div class="indicator-value" style="font-size: 15px;">₹${market.cpr.pivot}</div>
+                    <div style="font-size: 9px; color: #c4b5fd; margin-top: 4px;">TC: ₹${market.cpr.tc} | BC: ₹${market.cpr.bc}</div>
+                </div>
+            `;
+            
+            if (indicators.rsi) {
+                html += `
+                    <div class="indicator-card">
+                        <div class="indicator-label">RSI (14)</div>
+                        <div class="indicator-value">${indicators.rsi}</div>
+                        <span class="signal-badge ${signals.rsi || 'neutral'}">${(signals.rsi || 'neutral').toUpperCase()}</span>
+                    </div>
+                `;
+            }
+            
+            if (indicators.macd) {
+                html += `
+                    <div class="indicator-card">
+                        <div class="indicator-label">MACD</div>
+                        <div class="indicator-value">${indicators.macd}</div>
+                        <span class="signal-badge ${signals.macd || 'neutral'}">${(signals.macd || 'neutral').toUpperCase()}</span>
+                    </div>
+                `;
+            }
+            
+            if (indicators.sma_20) {
+                html += `
+                    <div class="indicator-card">
+                        <div class="indicator-label">SMA (20)</div>
+                        <div class="indicator-value">₹${indicators.sma_20}</div>
+                        <span class="signal-badge ${signals.sma || 'neutral'}">${(signals.sma || 'neutral').toUpperCase()}</span>
+                    </div>
+                `;
+            }
+            
+            if (indicators.atr) {
+                html += `
+                    <div class="indicator-card">
+                        <div class="indicator-label">ATR (14)</div>
+                        <div class="indicator-value">${indicators.atr}</div>
+                        <div style="font-size: 9px; color: #94a3b8; margin-top: 4px;">Volatility</div>
+                    </div>
+                `;
+            }
+            
+            if (market.volume) {
+                html += `
+                    <div class="indicator-card">
+                        <div class="indicator-label">Volume</div>
+                        <div class="indicator-value" style="font-size: 15px;">${(market.volume.current_volume / 1000000).toFixed(2)}M</div>
+                        <div style="font-size: 9px; color: #94a3b8; margin-top: 4px;">${market.volume.volume_trend.toUpperCase()}</div>
+                    </div>
+                `;
+            }
+            
+            if (indicators.momentum) {
+                html += `
+                    <div class="indicator-card">
+                        <div class="indicator-label">Momentum</div>
+                        <div class="indicator-value ${indicators.momentum > 0 ? 'bullish-text' : 'bearish-text'}">${indicators.momentum}%</div>
+                        <span class="signal-badge ${signals.momentum || 'neutral'}">${(signals.momentum || 'neutral').toUpperCase()}</span>
+                    </div>
+                `;
+            }
+            
+            document.getElementById('indicatorsGrid').innerHTML = html;
+        }
+
+        function getCanvasSize() {
+            const isMobile = window.innerWidth <= 768;
+            const isSmallMobile = window.innerWidth <= 480;
+            
+            if (isSmallMobile) return { width: 600, height: 320 };
+            if (isMobile) return { width: 700, height: 380 };
+            
+            const wrapper = document.querySelector('.chart-wrapper');
+            return { width: wrapper.offsetWidth, height: 450 };
+        }
+
+        function updateChart() {
+            const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
+            const marketName = currentChart === 'nifty' ? 'Nifty 50' : 'Bank Nifty';
+            const tfLabel = marketData.timeframe_label || currentTimeframe.toUpperCase();
+            
+            const cprBasis = market.cpr?.basis || 'Daily';
+            const cprPeriod = market.cpr?.period_label || 'N/A';
+            
+            document.getElementById('chartTitle').textContent = `📊 ${marketName} - ${tfLabel}`;
+            document.getElementById('chartSubtitle').textContent = `${market.dataPoints} candles | ${cprBasis} CPR: ₹${market.cpr.pivot} | ${cprPeriod}`;
+            
+            drawChart(market);
+        }
+
+        function drawChart(market) {
+            const canvas = document.getElementById('chartCanvas');
+            const ctx = canvas.getContext('2d');
+            const dpr = window.devicePixelRatio || 1;
+            const size = getCanvasSize();
+            
+            canvas.style.width = size.width + 'px';
+            canvas.style.height = size.height + 'px';
+            canvas.width = size.width * dpr;
+            canvas.height = size.height * dpr;
+            ctx.scale(dpr, dpr);
+            
+            const width = size.width;
+            const height = size.height;
+            const isMobile = window.innerWidth <= 768;
+            const volumeHeight = showVolume ? (isMobile ? 50 : 80) : 0;
+            const chartHeight = height - volumeHeight - (isMobile ? 65 : 80);
+            const chartTop = isMobile ? 45 : 60;
+            
+            ctx.clearRect(0, 0, width, height);
+            
+            const data = market.candleData;
+            const maxPrice = Math.max(...data.map(c => parseFloat(c.high)));
+            const minPrice = Math.min(...data.map(c => parseFloat(c.low)));
+            const priceRange = maxPrice - minPrice;
+            const candleWidth = Math.max(2, Math.min(isMobile ? 8 : 12, width / data.length - 2));
+            const spacing = width / (data.length + 1);
+            
+            const priceToY = (price) => {
+                return chartTop + chartHeight - ((price - minPrice) / priceRange) * chartHeight;
+            };
+            
+            const cprBasis = market.cpr?.basis || 'Daily';
+            const cprPeriod = market.cpr?.period_label || 'N/A';
+            const srInfo = market.sr_info || {};
+            
+            const headerHeight = isMobile ? 38 : 45;
+            ctx.fillStyle = 'rgba(139, 92, 246, 0.2)';
+            ctx.fillRect(0, 0, width, headerHeight);
+            ctx.fillStyle = '#c4b5fd';
+            ctx.font = `bold ${isMobile ? 10 : 12}px sans-serif`;
+            ctx.fillText(`📊 ${cprBasis} CPR`, 10, isMobile ? 15 : 18);
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = `${isMobile ? 9 : 11}px sans-serif`;
+            if (isMobile) {
+                ctx.fillText(`PP:${market.cpr.pivot} TC:${market.cpr.tc} BC:${market.cpr.bc}`, 10, 30);
+            } else {
+                ctx.fillText(`PP: ₹${market.cpr.pivot} | TC: ₹${market.cpr.tc} | BC: ₹${market.cpr.bc}`, 15, 35);
+            }
+            
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 5; i++) {
+                const y = chartTop + (chartHeight / 5) * i;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+                
+                const price = (minPrice + (priceRange * (5 - i) / 5)).toFixed(0);
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+                ctx.font = `${isMobile ? 8 : 10}px sans-serif`;
+                ctx.fillText(`₹${price}`, 3, y - 2);
+            }
+            
+            if (showCPR) {
+                const tcY = priceToY(parseFloat(market.cpr.tc));
+                const bcY = priceToY(parseFloat(market.cpr.bc));
+                ctx.fillStyle = 'rgba(139, 92, 246, 0.1)';
+                ctx.fillRect(0, tcY, width, bcY - tcY);
+                ctx.strokeStyle = 'rgba(139, 92, 246, 0.4)';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(0, tcY, width, bcY - tcY);
+            }
+            
+            if (showSR) {
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([5, 5]);
+                
+                const resistanceLevels = market.resistance || [];
+                const supportLevels = market.support || [];
+                const labelW = isMobile ? 55 : 70;
+                
+                resistanceLevels.forEach((r, idx) => {
+                    const value = typeof r === 'object' ? r.value : r;
+                    const level = typeof r === 'object' ? r.level : `R${idx + 1}`;
+                    const y = priceToY(parseFloat(value));
+                    
+                    ctx.strokeStyle = '#ef4444';
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(width, y);
+                    ctx.stroke();
+                    
+                    ctx.fillStyle = '#ef4444';
+                    ctx.fillRect(width - labelW, y - 7, labelW - 5, 14);
+                    ctx.fillStyle = 'white';
+                    ctx.font = `bold ${isMobile ? 7 : 9}px sans-serif`;
+                    ctx.fillText(`${level}:${value}`, width - labelW + 3, y + 3);
+                });
+                
+                supportLevels.forEach((s, idx) => {
+                    const value = typeof s === 'object' ? s.value : s;
+                    const level = typeof s === 'object' ? s.level : `S${idx + 1}`;
+                    const y = priceToY(parseFloat(value));
+                    
+                    ctx.strokeStyle = '#10b981';
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(width, y);
+                    ctx.stroke();
+                    
+                    ctx.fillStyle = '#10b981';
+                    ctx.fillRect(width - labelW, y - 7, labelW - 5, 14);
+                    ctx.fillStyle = 'white';
+                    ctx.font = `bold ${isMobile ? 7 : 9}px sans-serif`;
+                    ctx.fillText(`${level}:${value}`, width - labelW + 3, y + 3);
+                });
+                
+                ctx.setLineDash([]);
+            }
+            
+            if (showCPR) {
+                ctx.lineWidth = 2;
+                
+                const pivotY = priceToY(parseFloat(market.cpr.pivot));
+                ctx.strokeStyle = '#8b5cf6';
+                ctx.beginPath();
+                ctx.moveTo(0, pivotY);
+                ctx.lineTo(width, pivotY);
+                ctx.stroke();
+                
+                ['tc', 'bc'].forEach(level => {
+                    const y = priceToY(parseFloat(market.cpr[level]));
+                    ctx.strokeStyle = '#a78bfa';
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(width, y);
+                    ctx.stroke();
+                });
+            }
+            
+            if (showVolume && market.volume) {
+                const volumeY = chartTop + chartHeight + 15;
+                const maxVol = Math.max(...data.map(c => c.volume || 0));
+                
+                data.forEach((candle, index) => {
+                    if (!candle.volume) return;
+                    const x = spacing * (index + 0.5);
+                    const volHeight = (candle.volume / maxVol) * (volumeHeight - 10);
+                    const color = candle.isBullish ? 'rgba(16, 185, 129, 0.4)' : 'rgba(239, 68, 68, 0.4)';
+                    
+                    ctx.fillStyle = color;
+                    ctx.fillRect(x - candleWidth / 2, volumeY + volumeHeight - volHeight, candleWidth, volHeight);
+                });
+            }
+            
+            data.forEach((candle, index) => {
+                const x = spacing * (index + 0.5);
+                const openY = priceToY(parseFloat(candle.open));
+                const closeY = priceToY(parseFloat(candle.close));
+                const highY = priceToY(parseFloat(candle.high));
+                const lowY = priceToY(parseFloat(candle.low));
+                const color = candle.isBullish ? '#10b981' : '#ef4444';
+                
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(x, highY);
+                ctx.lineTo(x, lowY);
+                ctx.stroke();
+                
+                ctx.fillStyle = color;
+                const bodyHeight = Math.abs(closeY - openY) || 1;
+                ctx.fillRect(x - candleWidth / 2, Math.min(openY, closeY), candleWidth, bodyHeight);
+            });
+            
+            const legendH = isMobile ? 18 : 22;
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(5, height - legendH - 4, isMobile ? width - 10 : 580, legendH);
+            ctx.font = `bold ${isMobile ? 8 : 10}px sans-serif`;
+            ctx.fillStyle = '#8b5cf6';
+            ctx.fillText(`■ CPR`, 10, height - 10);
+            ctx.fillStyle = '#ef4444';
+            ctx.fillText('- R', isMobile ? 60 : 90, height - 10);
+            ctx.fillStyle = '#10b981';
+            ctx.fillText('- S', isMobile ? 90 : 150, height - 10);
+            if (!isMobile) {
+                ctx.fillStyle = 'white';
+                ctx.fillText(`${currentTimeframe.toUpperCase()} | ${data.length} Candles`, 200, height - 10);
+            }
+        }
+
+        function switchChart(chart) {
+            currentChart = chart;
+            document.getElementById('btnNifty').classList.toggle('active', chart === 'nifty');
+            document.getElementById('btnBankNifty').classList.toggle('active', chart === 'banknifty');
+            if (marketData) {
+                updateIndicators();
+                updateChart();
+            }
+        }
+
+        function toggleCPR() {
+            showCPR = !showCPR;
+            document.getElementById('btnCPR').classList.toggle('active', showCPR);
+            if (marketData) updateChart();
+        }
+
+        function toggleSR() {
+            showSR = !showSR;
+            document.getElementById('btnSR').classList.toggle('active', showSR);
+            if (marketData) updateChart();
+        }
+
+        function toggleVolume() {
+            showVolume = !showVolume;
+            document.getElementById('btnVolume').classList.toggle('active', showVolume);
+            if (marketData) updateChart();
+        }
+
+        // Initialize
+        window.addEventListener('load', () => {
+            console.log('Mobile-Friendly Trading Dashboard Loaded');
+            
+            // Show config banner if using default localhost and not on localhost
+            if (API_BASE_URL.includes('localhost') && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+                document.getElementById('configBanner').classList.add('show');
+                document.getElementById('apiUrlInput').value = '';
+            }
+            
+            fetchMarketData();
+        });
+        
+        window.addEventListener('resize', () => {
+            if (marketData) updateChart();
+        });
+
+        window.addEventListener('beforeunload', () => {
+            stopAutoRefresh();
+        });
+    </script>
+</body>
+</html>
