@@ -1,0 +1,17 @@
+# Exported from Render on 2026-08-26T17:23:44Z
+version: "1"
+projects:
+- name: My project
+  environments:
+  - name: Production
+    services:
+    - type: web
+      name: indian-market-predictor-api
+      runtime: python
+      repo: https://github.com/Hari8282/indian-market-predictor
+      plan: free
+      region: oregon
+      buildCommand: pip install -r requirements.txt
+      startCommand: gunicorn app:app
+      autoDeployTrigger: commit
+      rootDir: backend
