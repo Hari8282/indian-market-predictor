@@ -1,8 +1,8 @@
 flask==3.0.3
 flask-cors==4.0.1
-yfinance==0.2.40
-pandas==2.2.2
-numpy==1.26.4
+yfinance==0.2.51
+pandas==2.3.3
+numpy==2.3.2
 ta==0.11.0
 python-dateutil==2.9.0.post0
 gunicorn==22.0.0
