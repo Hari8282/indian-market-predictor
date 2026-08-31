@@ -285,6 +285,8 @@ def fetch_market_data(symbol, timeframe='15m'):
     Ticker-based approach fails against Yahoo's current API behavior.
     Retries once with a fresh session if both fail initially.
     """
+    global _YF_SESSION
+    
     if timeframe not in TIMEFRAMES:
         timeframe = '15m'
     
@@ -325,7 +327,6 @@ def fetch_market_data(symbol, timeframe='15m'):
         
         # Both methods failed this attempt - refresh session and retry once
         if attempt == 0:
-            global _YF_SESSION
             _YF_SESSION = get_yf_session()
             time.sleep(1.5)
     
