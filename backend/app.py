@@ -8,10 +8,9 @@ from flask_cors import CORS
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import ta
 import logging
-from functools import lru_cache
 import time
 import os
 
@@ -19,22 +18,16 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# curl_cffi is used to impersonate a real browser's TLS fingerprint so Yahoo
-# Finance doesn't block requests coming from cloud/datacenter IPs (Render,
-# Railway, etc). It's optional at import time â€” if it's not installed for
-# any reason, we fall back to plain yfinance requests instead of crashing.
 try:
     from curl_cffi import requests as curl_requests
     CURL_CFFI_AVAILABLE = True
     logger.info("curl_cffi loaded successfully - using browser-impersonated sessions")
 except ImportError as e:
     CURL_CFFI_AVAILABLE = False
-    logger.warning(f"curl_cffi not available ({e}) - falling back to plain yfinance requests. "
-                    f"This may cause Yahoo Finance to block requests from cloud IPs.")
+    logger.warning(f"curl_cffi not available ({e}) - falling back to plain yfinance requests.")
 
 app = Flask(__name__)
 
-# CORS Configuration - Allow requests from GitHub Pages and local development
 CORS(app, resources={
     r"/api/*": {
         "origins": "*",
@@ -43,10 +36,9 @@ CORS(app, resources={
     }
 })
 
-# Cache configuration
-CACHE_TIMEOUT = 60  # seconds
+CACHE_TIMEOUT = 60
+_YF_SESSION = None
 
-# Shared browser-impersonating session for all Yahoo Finance requests.
 def get_yf_session():
     """Create a fresh impersonated session for Yahoo Finance requests, if available"""
     if not CURL_CFFI_AVAILABLE:
@@ -70,7 +62,6 @@ def get_ticker(symbol):
         logger.warning(f"Ticker creation with session failed for {symbol}, retrying without session: {e}")
         return yf.Ticker(symbol)
 
-# Global market indices
 GLOBAL_INDICES = {
     'asian': {
         '^N225': 'Nikkei 225',
@@ -90,7 +81,6 @@ GLOBAL_INDICES = {
     }
 }
 
-# Timeframe configurations with CPR period mapping
 TIMEFRAMES = {
     '1m': {'period': '1d', 'interval': '1m', 'label': '1 Minute', 'cpr_basis': 'daily'},
     '5m': {'period': '5d', 'interval': '5m', 'label': '5 Minutes', 'cpr_basis': 'daily'},
@@ -102,15 +92,6 @@ TIMEFRAMES = {
 }
 
 def get_cpr_period_data(symbol, timeframe):
-    """
-    Fetch previous period data for CPR calculation based on timeframe
-    
-    - 1m, 5m, 15m, 30m: Previous day's OHLC (Daily CPR)
-    - 1h, 1d: Previous week's OHLC (Weekly CPR)
-    - 1wk: Previous month's OHLC (Monthly CPR)
-    
-    Returns None on any failure so caller can gracefully fall back.
-    """
     try:
         ticker = get_ticker(symbol)
         cpr_basis = TIMEFRAMES.get(timeframe, {}).get('cpr_basis', 'daily')
@@ -127,7 +108,6 @@ def get_cpr_period_data(symbol, timeframe):
                     'basis': 'Daily',
                     'period_label': f"Previous Day ({data.index[-2].strftime('%d %b %Y')})"
                 }
-        
         elif cpr_basis == 'weekly':
             data = ticker.history(period='1mo', interval='1wk', timeout=10)
             if data is not None and len(data) >= 2:
@@ -140,7 +120,6 @@ def get_cpr_period_data(symbol, timeframe):
                     'basis': 'Weekly',
                     'period_label': f"Previous Week ({data.index[-2].strftime('%d %b %Y')})"
                 }
-        
         elif cpr_basis == 'monthly':
             data = ticker.history(period='1y', interval='1mo', timeout=10)
             if data is not None and len(data) >= 2:
@@ -153,29 +132,20 @@ def get_cpr_period_data(symbol, timeframe):
                     'basis': 'Monthly',
                     'period_label': f"Previous Month ({data.index[-2].strftime('%b %Y')})"
                 }
-        
         logger.warning(f"CPR period data insufficient for {symbol} ({cpr_basis})")
         return None
-        
     except Exception as e:
-        logger.warning(f"CPR period fetch failed for {symbol} (non-fatal, will fall back): {e}")
+        logger.warning(f"CPR period fetch failed for {symbol}: {e}")
         return None
 
 def calculate_cpr_with_period(symbol, timeframe, current_data):
-    """
-    Calculate CPR based on appropriate previous period
-    Returns CPR values along with the basis period information
-    """
     period_data = get_cpr_period_data(symbol, timeframe)
-    
     if period_data is None:
-        # Fallback to current data if period data unavailable
         if current_data is None or len(current_data) == 0:
             return {
                 'pivot': 0.0, 'tc': 0.0, 'bc': 0.0,
                 'basis': 'N/A', 'period_label': 'N/A', 'date': 'N/A'
             }
-        
         high = float(current_data['High'].iloc[-1])
         low = float(current_data['Low'].iloc[-1])
         close = float(current_data['Close'].iloc[-1])
@@ -190,7 +160,6 @@ def calculate_cpr_with_period(symbol, timeframe, current_data):
         period_label = period_data['period_label']
         date = period_data['date']
     
-    # CPR Calculation
     pivot = (high + low + close) / 3
     bc = (high + low) / 2
     tc = (pivot - bc) + pivot
@@ -208,16 +177,10 @@ def calculate_cpr_with_period(symbol, timeframe, current_data):
     }
 
 def calculate_support_resistance_with_period(symbol, timeframe, current_data):
-    """
-    Calculate Support and Resistance based on appropriate previous period
-    """
     period_data = get_cpr_period_data(symbol, timeframe)
-    
     if period_data is None:
-        # Fallback to current data
         if current_data is None or len(current_data) == 0:
             return [], [], {'basis': 'N/A', 'period_label': 'N/A'}
-        
         high = float(current_data['High'].iloc[-1])
         low = float(current_data['Low'].iloc[-1])
         close = float(current_data['Close'].iloc[-1])
@@ -230,10 +193,7 @@ def calculate_support_resistance_with_period(symbol, timeframe, current_data):
         basis = period_data['basis']
         period_label = period_data['period_label']
     
-    # Pivot Point
     pivot = (high + low + close) / 3
-    
-    # Standard Pivot Point Levels
     r1 = (2 * pivot) - low
     r2 = pivot + (high - low)
     r3 = high + 2 * (pivot - low)
@@ -250,50 +210,29 @@ def calculate_support_resistance_with_period(symbol, timeframe, current_data):
         {'level': 'R3', 'value': float(round(r3, 2)), 'type': 'Standard'},
         {'level': 'R4', 'value': float(round(r4, 2)), 'type': 'Standard'}
     ]
-    
     support = [
         {'level': 'S1', 'value': float(round(s1, 2)), 'type': 'Standard'},
         {'level': 'S2', 'value': float(round(s2, 2)), 'type': 'Standard'},
         {'level': 'S3', 'value': float(round(s3, 2)), 'type': 'Standard'},
         {'level': 'S4', 'value': float(round(s4, 2)), 'type': 'Standard'}
     ]
-    
-    sr_info = {
-        'basis': str(basis),
-        'period_label': str(period_label)
-    }
-    
-    return support, resistance, sr_info
+    return support, resistance, {'basis': str(basis), 'period_label': str(period_label)}
 
 def fetch_market_data(symbol, timeframe='15m'):
-    """
-    Fetch market data for specific timeframe.
-    Tries Ticker.history() first, then falls back to yf.download() which
-    uses a different internal code path and sometimes succeeds when the
-    Ticker-based approach fails against Yahoo's current API behavior.
-    Retries once with a fresh session if both fail initially.
-    """
     global _YF_SESSION
-    
     if timeframe not in TIMEFRAMES:
         timeframe = '15m'
-    
     config = TIMEFRAMES[timeframe]
     
     for attempt in range(2):
-        # Method 1: Ticker.history()
         try:
             ticker = get_ticker(symbol)
             data = ticker.history(period=config['period'], interval=config['interval'], timeout=15)
-            
             if data is not None and not data.empty:
-                logger.info(f"[Ticker method] Fetched {len(data)} candles for {symbol} on {timeframe}")
                 return data
-            logger.warning(f"[Ticker method] Attempt {attempt+1}: empty response for {symbol} on {timeframe}")
         except Exception as e:
-            logger.warning(f"[Ticker method] Attempt {attempt+1} error for {symbol}: {type(e).__name__}: {e}")
+            logger.warning(f"Ticker history method failed: {e}")
         
-        # Method 2: yf.download() fallback
         try:
             data = yf.download(
                 symbol,
@@ -304,108 +243,39 @@ def fetch_market_data(symbol, timeframe='15m'):
                 threads=False
             )
             if data is not None and not data.empty:
-                # yf.download() with a single symbol can return MultiIndex columns; flatten if needed
                 if isinstance(data.columns, pd.MultiIndex):
                     data.columns = data.columns.get_level_values(0)
-                logger.info(f"[Download method] Fetched {len(data)} candles for {symbol} on {timeframe}")
                 return data
-            logger.warning(f"[Download method] Attempt {attempt+1}: empty response for {symbol} on {timeframe}")
         except Exception as e:
-            logger.warning(f"[Download method] Attempt {attempt+1} error for {symbol}: {type(e).__name__}: {e}")
+            logger.warning(f"Download method failed: {e}")
         
-        # Both methods failed this attempt - refresh session and retry once
         if attempt == 0:
             _YF_SESSION = get_yf_session()
             time.sleep(1.5)
-    
-    logger.error(f"All fetch methods exhausted for {symbol} on {timeframe}")
     return None
 
-def calculate_cpr(data):
-    """Calculate Central Pivot Range"""
-    if data is None or len(data) == 0:
-        return {'pivot': 0.0, 'tc': 0.0, 'bc': 0.0}
-    
-    high = float(data['High'].iloc[-1])
-    low = float(data['Low'].iloc[-1])
-    close = float(data['Close'].iloc[-1])
-    
-    pivot = (high + low + close) / 3
-    bc = (high + low) / 2
-    tc = (pivot - bc) + pivot
-    
-    return {
-        'pivot': float(round(pivot, 2)),
-        'tc': float(round(tc, 2)),
-        'bc': float(round(bc, 2))
-    }
-
-def calculate_support_resistance(data, num_levels=4):
-    """Calculate support and resistance levels"""
-    if data is None or len(data) == 0:
-        return [], []
-    
-    high = float(data['High'].iloc[-1])
-    low = float(data['Low'].iloc[-1])
-    close = float(data['Close'].iloc[-1])
-    
-    pivot = (high + low + close) / 3
-    
-    r1 = (2 * pivot) - low
-    r2 = pivot + (high - low)
-    r3 = high + 2 * (pivot - low)
-    r4 = high + 3 * (pivot - low)
-    
-    s1 = (2 * pivot) - high
-    s2 = pivot - (high - low)
-    s3 = low - 2 * (high - pivot)
-    s4 = low - 3 * (high - pivot)
-    
-    resistance = [float(round(r1, 2)), float(round(r2, 2)), float(round(r3, 2)), float(round(r4, 2))]
-    support = [float(round(s1, 2)), float(round(s2, 2)), float(round(s3, 2)), float(round(s4, 2))]
-    
-    return support, resistance
-
 def calculate_volume_analysis(data):
-    """Calculate volume-based indicators"""
     if data is None or len(data) < 20:
-        return {
-            'current_volume': 0,
-            'avg_volume': 0,
-            'volume_ratio': 1.0,
-            'volume_trend': 'neutral'
-        }
-    
+        return {'current_volume': 0, 'avg_volume': 0, 'volume_ratio': 1.0, 'volume_trend': 'neutral'}
     try:
         current_volume = float(data['Volume'].iloc[-1])
         avg_volume = float(data['Volume'].tail(20).mean())
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
-        
         volume_trend = 'high' if volume_ratio > 1.5 else 'low' if volume_ratio < 0.5 else 'normal'
-        
         return {
             'current_volume': int(round(current_volume, 0)),
             'avg_volume': int(round(avg_volume, 0)),
             'volume_ratio': float(round(volume_ratio, 2)),
             'volume_trend': str(volume_trend)
         }
-    except Exception as e:
-        logger.warning(f"Volume calculation error: {e}")
-        return {
-            'current_volume': 0,
-            'avg_volume': 0,
-            'volume_ratio': 1.0,
-            'volume_trend': 'neutral'
-        }
+    except Exception:
+        return {'current_volume': 0, 'avg_volume': 0, 'volume_ratio': 1.0, 'volume_trend': 'neutral'}
 
 def generate_candlestick_data(data, max_candles=100):
-    """Generate candlestick data"""
     if data is None or len(data) == 0:
         return []
-    
     candles = []
     recent_data = data.tail(max_candles)
-    
     for idx, (timestamp, row) in enumerate(recent_data.iterrows()):
         candles.append({
             'time': int(idx),
@@ -417,93 +287,64 @@ def generate_candlestick_data(data, max_candles=100):
             'volume': int(row['Volume']) if 'Volume' in row and not pd.isna(row['Volume']) else 0,
             'isBullish': bool(row['Close'] > row['Open'])
         })
-    
     return candles
 
 def calculate_technical_indicators(data):
-    """Calculate multiple technical indicators"""
     if data is None or len(data) < 20:
         return {}
-    
     try:
         indicators = {}
-        
-        # RSI
         if len(data) >= 14:
             rsi_indicator = ta.momentum.RSIIndicator(data['Close'], window=14)
             rsi_value = rsi_indicator.rsi().iloc[-1]
             if not pd.isna(rsi_value):
                 indicators['rsi'] = float(round(rsi_value, 2))
-        
-        # Moving Averages
         if len(data) >= 20:
             sma_20 = data['Close'].rolling(window=20).mean().iloc[-1]
             if not pd.isna(sma_20):
                 indicators['sma_20'] = float(round(sma_20, 2))
-                
         if len(data) >= 50:
             sma_50 = data['Close'].rolling(window=50).mean().iloc[-1]
             if not pd.isna(sma_50):
                 indicators['sma_50'] = float(round(sma_50, 2))
-                
         if len(data) >= 200:
             sma_200 = data['Close'].rolling(window=200).mean().iloc[-1]
             if not pd.isna(sma_200):
                 indicators['sma_200'] = float(round(sma_200, 2))
-        
-        # EMA
         if len(data) >= 12:
             ema_12 = data['Close'].ewm(span=12, adjust=False).mean().iloc[-1]
             if not pd.isna(ema_12):
                 indicators['ema_12'] = float(round(ema_12, 2))
-                
         if len(data) >= 26:
             ema_26 = data['Close'].ewm(span=26, adjust=False).mean().iloc[-1]
             if not pd.isna(ema_26):
                 indicators['ema_26'] = float(round(ema_26, 2))
-        
-        # MACD
         if len(data) >= 26:
             macd_indicator = ta.trend.MACD(data['Close'])
             macd_val = macd_indicator.macd().iloc[-1]
             macd_sig = macd_indicator.macd_signal().iloc[-1]
             macd_diff = macd_indicator.macd_diff().iloc[-1]
-            
-            if not pd.isna(macd_val):
-                indicators['macd'] = float(round(macd_val, 2))
-            if not pd.isna(macd_sig):
-                indicators['macd_signal'] = float(round(macd_sig, 2))
-            if not pd.isna(macd_diff):
-                indicators['macd_diff'] = float(round(macd_diff, 2))
-        
-        # Bollinger Bands
+            if not pd.isna(macd_val): indicators['macd'] = float(round(macd_val, 2))
+            if not pd.isna(macd_sig): indicators['macd_signal'] = float(round(macd_sig, 2))
+            if not pd.isna(macd_diff): indicators['macd_diff'] = float(round(macd_diff, 2))
         if len(data) >= 20:
             bb_indicator = ta.volatility.BollingerBands(data['Close'], window=20)
             bb_upper = bb_indicator.bollinger_hband().iloc[-1]
             bb_middle = bb_indicator.bollinger_mavg().iloc[-1]
             bb_lower = bb_indicator.bollinger_lband().iloc[-1]
-            
-            if not pd.isna(bb_upper):
-                indicators['bb_upper'] = float(round(bb_upper, 2))
-            if not pd.isna(bb_middle):
-                indicators['bb_middle'] = float(round(bb_middle, 2))
-            if not pd.isna(bb_lower):
-                indicators['bb_lower'] = float(round(bb_lower, 2))
-        
-        # ATR (Average True Range)
+            if not pd.isna(bb_upper): indicators['bb_upper'] = float(round(bb_upper, 2))
+            if not pd.isna(bb_middle): indicators['bb_middle'] = float(round(bb_middle, 2))
+            if not pd.isna(bb_lower): indicators['bb_lower'] = float(round(bb_lower, 2))
         if len(data) >= 14:
             atr_indicator = ta.volatility.AverageTrueRange(data['High'], data['Low'], data['Close'], window=14)
             atr_val = atr_indicator.average_true_range().iloc[-1]
             if not pd.isna(atr_val):
                 indicators['atr'] = float(round(atr_val, 2))
-        
-        # Momentum
         if len(data) >= 10:
             current_price = float(data['Close'].iloc[-1])
             old_price = float(data['Close'].iloc[-10])
             momentum = ((current_price - old_price) / old_price) * 100
             indicators['momentum'] = float(round(momentum, 2))
-        
         return indicators
     except Exception as e:
         logger.error(f"Error calculating indicators: {e}")
@@ -512,19 +353,12 @@ def calculate_technical_indicators(data):
 def predict_market_direction(nifty_data, global_markets, indicators):
     """Enhanced prediction with multiple factors"""
     if nifty_data is None or len(nifty_data) < 20:
-        return {
-            'direction': 'neutral',
-            'confidence': 50.0,
-            'sentiment': 'neutral',
-            'signals': {},
-            'global_positive_ratio': 50.0
-        }
+        return {'direction': 'neutral', 'confidence': 50.0, 'sentiment': 'neutral', 'signals': {}, 'global_positive_ratio': 50.0}
     
     bullish_signals = 0
     total_signals = 0
     signals = {}
     
-    # RSI Signal
     if 'rsi' in indicators:
         rsi = indicators['rsi']
         if rsi < 30:
@@ -537,7 +371,6 @@ def predict_market_direction(nifty_data, global_markets, indicators):
             signals['rsi'] = 'neutral'
         total_signals += 1
     
-    # Moving Average Signal
     current_price = float(nifty_data['Close'].iloc[-1])
     if 'sma_20' in indicators:
         if current_price > indicators['sma_20']:
@@ -545,9 +378,8 @@ def predict_market_direction(nifty_data, global_markets, indicators):
             signals['sma'] = 'bullish'
         else:
             signals['sma'] = 'bearish'
- total_signals += 1
+        total_signals += 1
     
-    # MACD Signal
     if 'macd' in indicators and 'macd_signal' in indicators:
         if indicators['macd'] > indicators['macd_signal']:
             bullish_signals += 1
@@ -556,7 +388,6 @@ def predict_market_direction(nifty_data, global_markets, indicators):
             signals['macd'] = 'bearish'
         total_signals += 1
     
-    # Momentum Signal
     if 'momentum' in indicators:
         if indicators['momentum'] > 1:
             bullish_signals += 1
@@ -568,9 +399,7 @@ def predict_market_direction(nifty_data, global_markets, indicators):
             signals['momentum'] = 'neutral'
         total_signals += 1
     
-    # Global Market Sentiment
-    positive_global = sum(1 for region in global_markets.values() 
-                         for market in region if market.get('change', 0) > 0)
+    positive_global = sum(1 for region in global_markets.values() for market in region if market.get('change', 0) > 0)
     total_global = sum(len(region) for region in global_markets.values())
     global_ratio = positive_global / total_global if total_global > 0 else 0.5
     
@@ -584,20 +413,14 @@ def predict_market_direction(nifty_data, global_markets, indicators):
         signals['global'] = 'neutral'
     total_signals += 1
     
-    # Calculate confidence
     confidence = (bullish_signals / total_signals) * 100 if total_signals > 0 else 50
-    
-    # Determine direction
     if confidence > 65:
-        direction = 'bullish'
-        sentiment = 'positive'
+        direction, sentiment = 'bullish', 'positive'
     elif confidence < 35:
-        direction = 'bearish'
-        sentiment = 'negative'
+        direction, sentiment = 'bearish', 'negative'
     else:
-        direction = 'neutral'
-        sentiment = 'neutral'
-    
+        direction, sentiment = 'neutral', 'neutral'
+        
     return {
         'direction': str(direction),
         'confidence': float(round(confidence, 1)),
@@ -607,49 +430,34 @@ def predict_market_direction(nifty_data, global_markets, indicators):
     }
 
 def process_market_data(symbol, timeframe='15m'):
-    """Process complete market data for a symbol with period-based CPR"""
     try:
         data = fetch_market_data(symbol, timeframe)
-        
         if data is None or len(data) == 0:
-            logger.warning(f"No data for {symbol} on {timeframe}")
             return None
         
         current_price = float(data['Close'].iloc[-1])
         prev_close = float(data['Open'].iloc[0])
-        
         change = current_price - prev_close
         change_percent = (change / prev_close) * 100 if prev_close > 0 else 0
         
-        # Calculate CPR with appropriate period basis
         cpr = calculate_cpr_with_period(symbol, timeframe, data)
-        
-        # Calculate Support/Resistance with appropriate period basis
         support, resistance, sr_info = calculate_support_resistance_with_period(symbol, timeframe, data)
-        
         candles = generate_candlestick_data(data)
         volume = calculate_volume_analysis(data)
         indicators = calculate_technical_indicators(data)
         
-        # High/Low for the period
-        high_price = float(data['High'].max())
-        low_price = float(data['Low'].min())
-        
-        # Get CPR basis info
-        cpr_basis = TIMEFRAMES.get(timeframe, {}).get('cpr_basis', 'daily')
-        
         return {
             'current': float(round(current_price, 2)),
-            'open': float(round(float(data['Open'].iloc[0]), 2)),
-            'high': float(round(high_price, 2)),
-            'low': float(round(low_price, 2)),
+            'open': float(round(prev_close, 2)),
+            'high': float(round(data['High'].max(), 2)),
+            'low': float(round(data['Low'].min(), 2)),
             'change': float(round(change, 2)),
             'changePercent': float(round(change_percent, 2)),
             'cpr': cpr,
             'support': support,
             'resistance': resistance,
             'sr_info': sr_info,
-            'cpr_basis': str(cpr_basis),
+            'cpr_basis': str(TIMEFRAMES.get(timeframe, {}).get('cpr_basis', 'daily')),
             'candleData': candles,
             'volume': volume,
             'indicators': indicators,
@@ -660,9 +468,7 @@ def process_market_data(symbol, timeframe='15m'):
         return None
 
 def fetch_global_markets():
-    """Fetch global market data"""
     global_markets = {}
-    
     for region, indices in GLOBAL_INDICES.items():
         global_markets[region] = []
         for symbol, name in indices.items():
@@ -672,60 +478,33 @@ def fetch_global_markets():
                     current = float(data['Close'].iloc[-1])
                     prev_close = float(data['Close'].iloc[-2]) if len(data) > 1 else current
                     change = ((current - prev_close) / prev_close) * 100 if prev_close > 0 else 0
-                    
                     global_markets[region].append({
-                        'name': str(name),
-                        'value': float(round(current, 2)),
-                        'change': float(round(change, 2)),
-                        'trend': 'up' if change > 0 else 'down'
+                        'name': str(name), 'value': float(round(current, 2)),
+                        'change': float(round(change, 2)), 'trend': 'up' if change > 0 else 'down'
                     })
-            except Exception as e:
-                logger.warning(f"Skipping {name}: {e}")
+            except Exception:
                 continue
-    
     return global_markets
-
-@app.route('/api/debug', methods=['GET'])
-def debug_yfinance():
-    """Diagnostic endpoint to pinpoint why Yahoo Finance fetches fail."""
-    result = {
-        'curl_cffi_available': CURL_CFFI_AVAILABLE,
-        'session_created': _YF_SESSION is not None,
-        'yfinance_version': getattr(yf, '__version__', 'unknown')
-    }
-    try:
-        ticker = get_ticker('^NSEI')
-        data = ticker.history(period='5d', interval='15m', timeout=15)
-        result['nifty_fetch_success'] = data is not None and not data.empty
-        result['nifty_rows'] = int(len(data)) if data is not None else 0
-    except Exception as e:
-        result['nifty_fetch_success'] = False
-        result['nifty_error_type'] = type(e).__name__
-        result['nifty_error_message'] = str(e)
-    return jsonify(result)
 
 @app.route('/api/market-data', methods=['GET'])
 def get_market_data():
-    """Main API endpoint with timeframe support"""
     try:
         timeframe = request.args.get('timeframe', '15m')
         if timeframe not in TIMEFRAMES:
-            return jsonify({'error': 'Invalid timeframe', 'valid_timeframes': list(TIMEFRAMES.keys())}), 400
+            return jsonify({'error': 'Invalid timeframe'}), 400
         
-        logger.info(f"Fetching market data for timeframe: {timeframe}")
         nifty_data_raw = fetch_market_data('^NSEI', timeframe)
         if nifty_data_raw is None:
-            return jsonify({'error': 'Unable to fetch Nifty data', 'stage': 'nifty_raw_fetch'}), 502
+            return jsonify({'error': 'Unable to fetch Nifty data'}), 502
         
         nifty_data = process_market_data('^NSEI', timeframe)
         banknifty_data = process_market_data('^NSEBANK', timeframe)
         global_markets = fetch_global_markets()
         prediction = predict_market_direction(nifty_data_raw, global_markets, nifty_data.get('indicators', {}))
         
-        response = {
+        return jsonify({
             'timeframe': timeframe,
             'timeframe_label': TIMEFRAMES[timeframe]['label'],
-            'available_timeframes': {k: v['label'] for k, v in TIMEFRAMES.items()},
             'prediction': prediction,
             'globalMarkets': global_markets,
             'nifty': nifty_data,
@@ -733,34 +512,26 @@ def get_market_data():
             'timestamp': datetime.now().isoformat(),
             'market_status': get_market_status(),
             'status': 'success'
-        }
-        return jsonify(response)
+        })
     except Exception as e:
-        logger.error(f"Unhandled error: {e}", exc_info=True)
         return jsonify({'error': str(e), 'status': 'error'}), 500
-
-@app.route('/api/timeframes', methods=['GET'])
-def get_timeframes():
-    return jsonify({'timeframes': TIMEFRAMES, 'default': '15m'})
 
 def get_market_status():
     now = datetime.now()
-    if now.weekday() >= 5:
-        return 'closed'
+    if now.weekday() >= 5: return 'closed'
     market_open = now.replace(hour=9, minute=15, second=0)
     market_close = now.replace(hour=15, minute=30, second=0)
-    if market_open <= now <= market_close:
-        return 'open'
-    return 'pre_market' if now < market_open else 'closed'
+    return 'open' if market_open <= now <= market_close else 'closed'
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'healthy', 'market_status': get_market_status()})
+    return jsonify({'status': 'healthy'})
 
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({'service': 'Indian Stock Market Predictor', 'version': '2.0.0'})
 
 if __name__ == '__main__':
+    os.makedirs('generated', exist_ok=True)
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
