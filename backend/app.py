@@ -295,6 +295,54 @@ def fetch_market_data(symbol, timeframe='15m'):
     logger.error(f"All market-data providers failed for {symbol}")
     return None
 
+def detect_market_structure(data, lookback=80, swing=3):
+    if data is None or len(data)<20:return {"trend":"neutral","structure":[],"swingHighs":[],"swingLows":[],"score":0}
+    d=data.tail(lookback); highs=[]; lows=[]
+    for i in range(swing,len(d)-swing):
+        h=float(d["High"].iloc[i]); l=float(d["Low"].iloc[i])
+        if h>=float(d["High"].iloc[i-swing:i+swing+1].max()): highs.append((i,h))
+        if l<=float(d["Low"].iloc[i-swing:i+swing+1].min()): lows.append((i,l))
+    sh=[]; sl=[]
+    for n,(i,p) in enumerate(highs):
+        t="SH" if n==0 else ("HH" if p>highs[n-1][1] else "LH")
+        sh.append({"index":i,"timestamp":d.index[i].strftime("%Y-%m-%d %H:%M"),"price":round(p,2),"type":t})
+    for n,(i,p) in enumerate(lows):
+        t="SL" if n==0 else ("HL" if p>lows[n-1][1] else "LL")
+        sl.append({"index":i,"timestamp":d.index[i].strftime("%Y-%m-%d %H:%M"),"price":round(p,2),"type":t})
+    lh=sh[-1]["type"] if sh else None; ll=sl[-1]["type"] if sl else None
+    score=(1 if lh=="HH" else -1 if lh=="LH" else 0)+(1 if ll=="HL" else -1 if ll=="LL" else 0)
+    trend="bullish" if score==2 else "bearish" if score==-2 else "neutral"
+    structure=sorted([x for x in sh+sl if x["type"] in ("HH","HL","LH","LL")],key=lambda x:x["index"])[-12:]
+    return {"trend":trend,"structure":structure,"lastHighType":lh,"lastLowType":ll,"swingHighs":sh[-8:],"swingLows":sl[-8:],"score":score}
+
+def calculate_structure_sr(data, structure):
+    price=float(data["Close"].iloc[-1])
+    supports=sorted({x["price"] for x in structure["swingLows"] if x["price"]<price},reverse=True)[:4]
+    resistances=sorted({x["price"] for x in structure["swingHighs"] if x["price"]>price})[:4]
+    return ([{"level":f"MS-S{i+1}","value":v,"type":"Market Structure","source":"HH/HL/LL/LH"} for i,v in enumerate(supports)],
+            [{"level":f"MS-R{i+1}","value":v,"type":"Market Structure","source":"HH/HL/LL/LH"} for i,v in enumerate(resistances)])
+
+def generate_trade_signal(data,prediction,cpr,support,resistance,structure):
+    price=float(data["Close"].iloc[-1]); score=0; reasons=[]
+    direction=prediction.get("direction","neutral"); trend=structure.get("trend","neutral")
+    if direction=="bullish":score+=2;reasons.append("Global/market prediction bullish")
+    elif direction=="bearish":score-=2;reasons.append("Global/market prediction bearish")
+    if trend=="bullish":score+=3;reasons.append("HH + HL bullish structure")
+    elif trend=="bearish":score-=3;reasons.append("LH + LL bearish structure")
+    bc,tc=float(cpr.get("bc",0)),float(cpr.get("tc",0)); lo,hi=min(bc,tc),max(bc,tc)
+    if hi>0 and price>hi:score+=2;reasons.append("Price above CPR")
+    elif hi>0 and price<lo:score-=2;reasons.append("Price below CPR")
+    bull=float(data["Close"].iloc[-1])>float(data["Open"].iloc[-1])
+    score+=1 if bull else -1;reasons.append("Bullish candle confirmation" if bull else "Bearish candle confirmation")
+    signal="BUY" if score>=5 else "SELL" if score<=-5 else "HOLD"
+    ns=max([x for x in support if x["value"]<price],key=lambda x:x["value"],default=None)
+    nr=min([x for x in resistance if x["value"]>price],key=lambda x:x["value"],default=None)
+    atr=max(price*.003,1)
+    if signal=="BUY": stop=(ns["value"]-atr*.5) if ns else price-atr*1.5; target=nr["value"] if nr else price+atr*2
+    elif signal=="SELL": stop=(nr["value"]+atr*.5) if nr else price+atr*1.5; target=ns["value"] if ns else price-atr*2
+    else: stop=target=None
+    return {"signal":signal,"strength":"strong" if abs(score)>=8 else "moderate" if abs(score)>=5 else "weak","confidence":round(min(95,50+abs(score)*6),1),"score":score,"entry":round(price,2),"stopLoss":round(stop,2) if stop else None,"target":round(target,2) if target else None,"nearestSupport":ns,"nearestResistance":nr,"marketStructure":trend,"reasons":reasons}
+
 def calculate_volume_analysis(data):
     if data is None or len(data) < 20:
         return {'current_volume': 0, 'avg_volume': 0, 'volume_ratio': 1.0, 'volume_trend': 'neutral'}
@@ -484,9 +532,16 @@ def process_market_data(symbol, timeframe='15m', data=None):
         
         cpr = calculate_cpr_with_period(symbol, timeframe, data)
         support, resistance, sr_info = calculate_support_resistance_with_period(symbol, timeframe, data)
+        market_structure = detect_market_structure(data)
+        structure_support, structure_resistance = calculate_structure_sr(data, market_structure)
+        support = structure_support + support
+        resistance = structure_resistance + resistance
         candles = generate_candlestick_data(data)
         volume = calculate_volume_analysis(data)
         indicators = calculate_technical_indicators(data)
+        if prediction is None:
+            prediction = {'direction': 'neutral', 'confidence': 50.0}
+        trade_signal = generate_trade_signal(data, prediction, cpr, support, resistance, market_structure)
         
         return {
             'current': float(round(current_price, 2)),
@@ -499,6 +554,8 @@ def process_market_data(symbol, timeframe='15m', data=None):
             'support': support,
             'resistance': resistance,
             'sr_info': sr_info,
+            'marketStructure': market_structure,
+            'tradeSignal': trade_signal,
             'cpr_basis': str(TIMEFRAMES.get(timeframe, {}).get('cpr_basis', 'daily')),
             'candleData': candles,
             'volume': volume,
@@ -540,7 +597,7 @@ def get_market_data():
             return jsonify({'error': 'Unable to fetch Nifty data due to provider connection error.'}), 502
         
         nifty_data = process_market_data('^NSEI', timeframe, data=nifty_data_raw)
-        banknifty_data = process_market_data('^NSEBANK', timeframe)
+        banknifty_data = process_market_data('^NSEBANK', timeframe, prediction)
         global_markets = fetch_global_markets()
         
         # Safeguard if internal loops generated partial structures
