@@ -24,13 +24,7 @@ app = Flask(__name__)
 # CORS Configuration - Allow requests from GitHub Pages and local development
 CORS(app, resources={
     r"/api/*": {
-        "origins": [
-            "http://localhost:8000",
-            "http://localhost:3000",
-            "http://127.0.0.1:8000",
-            "https://*.github.io",
-            "*"  # For development; restrict this in production
-        ],
+        "origins": "*",
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type"]
     }
@@ -77,16 +71,17 @@ def get_cpr_period_data(symbol, timeframe):
     - 1m, 5m, 15m, 30m: Previous day's OHLC (Daily CPR)
     - 1h, 1d: Previous week's OHLC (Weekly CPR)
     - 1wk: Previous month's OHLC (Monthly CPR)
+    
+    Returns None on any failure so caller can gracefully fall back.
     """
     try:
         ticker = yf.Ticker(symbol)
         cpr_basis = TIMEFRAMES.get(timeframe, {}).get('cpr_basis', 'daily')
         
         if cpr_basis == 'daily':
-            # Get previous day's data
-            data = ticker.history(period='5d', interval='1d')
+            data = ticker.history(period='5d', interval='1d', timeout=10)
             if data is not None and len(data) >= 2:
-                prev_day = data.iloc[-2]  # Previous completed day
+                prev_day = data.iloc[-2]
                 return {
                     'high': float(prev_day['High']),
                     'low': float(prev_day['Low']),
@@ -97,10 +92,9 @@ def get_cpr_period_data(symbol, timeframe):
                 }
         
         elif cpr_basis == 'weekly':
-            # Get previous week's data
-            data = ticker.history(period='1mo', interval='1wk')
+            data = ticker.history(period='1mo', interval='1wk', timeout=10)
             if data is not None and len(data) >= 2:
-                prev_week = data.iloc[-2]  # Previous completed week
+                prev_week = data.iloc[-2]
                 return {
                     'high': float(prev_week['High']),
                     'low': float(prev_week['Low']),
@@ -111,10 +105,9 @@ def get_cpr_period_data(symbol, timeframe):
                 }
         
         elif cpr_basis == 'monthly':
-            # Get previous month's data
-            data = ticker.history(period='1y', interval='1mo')
+            data = ticker.history(period='1y', interval='1mo', timeout=10)
             if data is not None and len(data) >= 2:
-                prev_month = data.iloc[-2]  # Previous completed month
+                prev_month = data.iloc[-2]
                 return {
                     'high': float(prev_month['High']),
                     'low': float(prev_month['Low']),
@@ -124,11 +117,11 @@ def get_cpr_period_data(symbol, timeframe):
                     'period_label': f"Previous Month ({data.index[-2].strftime('%b %Y')})"
                 }
         
-        # Fallback to current data
+        logger.warning(f"CPR period data insufficient for {symbol} ({cpr_basis})")
         return None
         
     except Exception as e:
-        logger.error(f"Error fetching CPR period data: {e}")
+        logger.warning(f"CPR period fetch failed for {symbol} (non-fatal, will fall back): {e}")
         return None
 
 def calculate_cpr_with_period(symbol, timeframe, current_data):
@@ -257,16 +250,16 @@ def fetch_market_data(symbol, timeframe='15m'):
         
         config = TIMEFRAMES[timeframe]
         ticker = yf.Ticker(symbol)
-        data = ticker.history(period=config['period'], interval=config['interval'])
+        data = ticker.history(period=config['period'], interval=config['interval'], timeout=15)
         
-        if data.empty:
-            logger.warning(f"No data returned for {symbol} on {timeframe}")
+        if data is None or data.empty:
+            logger.warning(f"No data returned for {symbol} on {timeframe} (empty response from yfinance)")
             return None
             
         logger.info(f"Fetched {len(data)} candles for {symbol} on {timeframe}")
         return data
     except Exception as e:
-        logger.error(f"Error fetching {symbol} on {timeframe}: {e}")
+        logger.error(f"Error fetching {symbol} on {timeframe}: {type(e).__name__}: {e}")
         return None
 
 def calculate_cpr(data):
@@ -648,18 +641,47 @@ def get_market_data():
         logger.info(f"Fetching market data for timeframe: {timeframe}")
         
         # Fetch Indian markets
+        logger.info("Fetching Nifty raw data...")
         nifty_data_raw = fetch_market_data('^NSEI', timeframe)
-        nifty_data = process_market_data('^NSEI', timeframe)
-        banknifty_data = process_market_data('^NSEBANK', timeframe)
+        if nifty_data_raw is None:
+            logger.error("Nifty raw data fetch returned None")
+            return jsonify({'error': 'Unable to fetch Nifty data from Yahoo Finance', 'stage': 'nifty_raw_fetch'}), 502
         
-        if nifty_data is None or banknifty_data is None:
-            return jsonify({'error': 'Unable to fetch market data'}), 500
+        logger.info("Processing Nifty data (CPR, S/R, indicators)...")
+        try:
+            nifty_data = process_market_data('^NSEI', timeframe)
+        except Exception as e:
+            logger.error(f"Nifty processing failed: {e}", exc_info=True)
+            return jsonify({'error': f'Nifty processing failed: {str(e)}', 'stage': 'nifty_processing'}), 500
+        
+        if nifty_data is None:
+            return jsonify({'error': 'Nifty data processing returned None', 'stage': 'nifty_processing'}), 502
+        
+        logger.info("Processing Bank Nifty data...")
+        try:
+            banknifty_data = process_market_data('^NSEBANK', timeframe)
+        except Exception as e:
+            logger.error(f"Bank Nifty processing failed: {e}", exc_info=True)
+            return jsonify({'error': f'Bank Nifty processing failed: {str(e)}', 'stage': 'banknifty_processing'}), 500
+        
+        if banknifty_data is None:
+            return jsonify({'error': 'Bank Nifty data processing returned None', 'stage': 'banknifty_processing'}), 502
         
         # Fetch global markets (always daily)
-        global_markets = fetch_global_markets()
+        logger.info("Fetching global markets...")
+        try:
+            global_markets = fetch_global_markets()
+        except Exception as e:
+            logger.error(f"Global markets fetch failed: {e}", exc_info=True)
+            global_markets = {'asian': [], 'european': [], 'us': []}
         
         # Generate prediction
-        prediction = predict_market_direction(nifty_data_raw, global_markets, nifty_data.get('indicators', {}))
+        logger.info("Generating market prediction...")
+        try:
+            prediction = predict_market_direction(nifty_data_raw, global_markets, nifty_data.get('indicators', {}))
+        except Exception as e:
+            logger.error(f"Prediction generation failed: {e}", exc_info=True)
+            prediction = {'direction': 'neutral', 'confidence': 50.0, 'sentiment': 'neutral', 'signals': {}, 'global_positive_ratio': 50.0}
         
         response = {
             'timeframe': timeframe,
@@ -678,7 +700,7 @@ def get_market_data():
         return jsonify(response)
     
     except Exception as e:
-        logger.error(f"Error in get_market_data: {e}")
+        logger.error(f"Unhandled error in get_market_data: {e}", exc_info=True)
         return jsonify({
             'error': str(e),
             'status': 'error'
