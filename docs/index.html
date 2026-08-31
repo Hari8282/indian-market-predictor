@@ -713,6 +713,28 @@
                 font-size: 16px;
             }
         }
+
+        /* Strategy Signal */
+        .strategy-section { margin: 16px 0; }
+        .strategy-card { background: linear-gradient(135deg, #111827, #1f2937); border: 1px solid rgba(148,163,184,.22); border-radius: 16px; padding: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+        .strategy-top { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+        .strategy-title { font-weight:800; letter-spacing:.04em; color:#e5e7eb; }
+        .strategy-badge { font-size:24px; font-weight:900; padding:8px 16px; border-radius:999px; }
+        .strategy-badge.buy { background:rgba(16,185,129,.18); color:#34d399; border:1px solid rgba(52,211,153,.45); }
+        .strategy-badge.sell { background:rgba(239,68,68,.18); color:#f87171; border:1px solid rgba(248,113,113,.45); }
+        .strategy-badge.hold { background:rgba(245,158,11,.18); color:#fbbf24; border:1px solid rgba(251,191,36,.45); }
+        .strategy-meta { display:flex; gap:8px; flex-wrap:wrap; }
+        .strategy-pill { background:rgba(148,163,184,.12); color:#cbd5e1; border-radius:999px; padding:5px 9px; font-size:12px; }
+        .strategy-grid { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:10px; margin:12px 0; }
+        .strategy-value { background:rgba(255,255,255,.045); border-radius:10px; padding:10px; }
+        .strategy-value span { display:block; color:#94a3b8; font-size:11px; margin-bottom:4px; }
+        .strategy-value strong { font-size:15px; color:#f8fafc; }
+        .structure-row { display:flex; gap:7px; flex-wrap:wrap; margin:10px 0; }
+        .structure-tag { padding:5px 8px; border-radius:7px; background:rgba(139,92,246,.14); color:#c4b5fd; font-weight:700; font-size:12px; }
+        .strategy-reasons { margin:10px 0 0; padding-left:18px; color:#cbd5e1; font-size:12px; line-height:1.6; }
+        .strategy-empty { color:#94a3b8; padding:12px 0; }
+        @media (max-width:600px){ .strategy-card{padding:13px}.strategy-grid{grid-template-columns:1fr 1fr}.strategy-value:last-child{grid-column:span 2}.strategy-badge{font-size:19px;padding:7px 12px} }
+
     </style>
 </head>
 <body>
@@ -833,6 +855,14 @@
                 <div class="indicator-card">
                     <div class="indicator-label">Loading...</div>
                     <div class="indicator-value">--</div>
+                </div>
+            </div>
+
+
+            <!-- HH/HL/LH/LL + CPR + Support/Resistance Strategy -->
+            <div class="strategy-section">
+                <div class="strategy-card" id="strategyCard">
+                    <div class="strategy-empty">Loading strategy signal...</div>
                 </div>
             </div>
 
@@ -1040,6 +1070,7 @@
             updatePrediction();
             updateGlobalMarkets();
             updateIndicators();
+            updateStrategySignal();
             updateChart();
         }
 
@@ -1232,6 +1263,42 @@
             return { width: wrapper.offsetWidth, height: 450 };
         }
 
+
+        function updateStrategySignal() {
+            const container = document.getElementById('strategyCard');
+            const market = currentChart === 'nifty' ? marketData?.nifty : marketData?.bankNifty;
+            const signal = market?.tradeSignal;
+            const structure = market?.marketStructure;
+            if (!market || !signal) {
+                container.innerHTML = '<div class="strategy-empty">Strategy signal is unavailable. Check that the updated backend is deployed.</div>';
+                return;
+            }
+            const side = String(signal.signal || 'HOLD').toUpperCase();
+            const sideClass = side.toLowerCase();
+            const icon = side === 'BUY' ? '🟢' : side === 'SELL' ? '🔴' : '🟡';
+            const fmt = v => (v === null || v === undefined || Number.isNaN(Number(v))) ? '--' : '₹' + Number(v).toLocaleString('en-IN', {maximumFractionDigits: 2});
+            const structureTags = (structure?.structure || []).slice(-8).map(x => `<span class="structure-tag">${x.type} · ${fmt(x.price)}</span>`).join('') || `<span class="structure-tag">${String(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span>`;
+            const reasons = (signal.reasons || []).map(r => `<li>✓ ${r}</li>`).join('') || '<li>Waiting for enough confirmation.</li>';
+            const prediction = marketData?.prediction || {};
+            container.innerHTML = `
+                <div class="strategy-top">
+                    <div>
+                        <div class="strategy-title">🎯 ${currentChart === 'nifty' ? 'NIFTY 50' : 'BANK NIFTY'} STRATEGY SIGNAL</div>
+                        <div class="strategy-meta"><span class="strategy-pill">Prediction: ${(prediction.direction || 'neutral').toUpperCase()}</span><span class="strategy-pill">CPR: ${(signal.cprPosition || 'inside').toUpperCase()}</span><span class="strategy-pill">Score: ${signal.score ?? '--'}</span></div>
+                    </div>
+                    <div class="strategy-badge ${sideClass}">${icon} ${side}</div>
+                </div>
+                <div class="strategy-meta"><span class="strategy-pill">Strength: ${(signal.strength || 'weak').toUpperCase()}</span><span class="strategy-pill">Confidence: ${signal.confidence ?? '--'}%</span><span class="strategy-pill">Structure: ${(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span></div>
+                <div class="strategy-grid">
+                    <div class="strategy-value"><span>ENTRY</span><strong>${fmt(signal.entry ?? market.current)}</strong></div>
+                    <div class="strategy-value"><span>STOP LOSS</span><strong>${fmt(signal.stopLoss)}</strong></div>
+                    <div class="strategy-value"><span>TARGET</span><strong>${fmt(signal.target)}</strong></div>
+                </div>
+                <div class="structure-row">${structureTags}</div>
+                <div class="strategy-meta"><span class="strategy-pill">Support: ${fmt(signal.nearestSupport?.value)}</span><span class="strategy-pill">Resistance: ${fmt(signal.nearestResistance?.value)}</span></div>
+                <ul class="strategy-reasons">${reasons}</ul>`;
+        }
+
         function updateChart() {
             const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
             const marketName = currentChart === 'nifty' ? 'Nifty 50' : 'Bank Nifty';
@@ -1268,9 +1335,16 @@
             ctx.clearRect(0, 0, width, height);
             
             const data = market.candleData;
-            const maxPrice = Math.max(...data.map(c => parseFloat(c.high)));
-            const minPrice = Math.min(...data.map(c => parseFloat(c.low)));
-            const priceRange = maxPrice - minPrice;
+            const levelValues = [
+                ...(market.support || []), ...(market.resistance || []),
+                market.cpr?.pivot, market.cpr?.tc, market.cpr?.bc
+            ].map(x => parseFloat(typeof x === 'object' ? x.value : x)).filter(Number.isFinite);
+            const rawMax = Math.max(...data.map(c => parseFloat(c.high)), ...levelValues);
+            const rawMin = Math.min(...data.map(c => parseFloat(c.low)), ...levelValues);
+            const padding = Math.max((rawMax - rawMin) * 0.08, 1);
+            const maxPrice = rawMax + padding;
+            const minPrice = rawMin - padding;
+            const priceRange = Math.max(maxPrice - minPrice, 1);
             const candleWidth = Math.max(2, Math.min(isMobile ? 8 : 12, width / data.length - 2));
             const spacing = width / (data.length + 1);
             
@@ -1445,6 +1519,7 @@
             document.getElementById('btnBankNifty').classList.toggle('active', chart === 'banknifty');
             if (marketData) {
                 updateIndicators();
+                updateStrategySignal();
                 updateChart();
             }
         }
