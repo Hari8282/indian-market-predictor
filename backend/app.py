@@ -14,6 +14,7 @@ import logging
 from functools import lru_cache
 import time
 import os
+from curl_cffi import requests as curl_requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +33,31 @@ CORS(app, resources={
 
 # Cache configuration
 CACHE_TIMEOUT = 60  # seconds
+
+# Shared browser-impersonating session for all Yahoo Finance requests.
+# Yahoo Finance blocks plain/default requests (especially from cloud/datacenter
+# IPs like Render, Railway, Heroku) via Cloudflare bot detection. curl_cffi
+# impersonates a real Chrome TLS fingerprint so requests succeed reliably.
+def get_yf_session():
+    """Create a fresh impersonated session for Yahoo Finance requests"""
+    try:
+        return curl_requests.Session(impersonate="chrome")
+    except Exception as e:
+        logger.warning(f"Could not create curl_cffi session, falling back to default: {e}")
+        return None
+
+_YF_SESSION = get_yf_session()
+
+def get_ticker(symbol):
+    """Get a yfinance Ticker using the browser-impersonating session"""
+    global _YF_SESSION
+    try:
+        if _YF_SESSION is not None:
+            return yf.Ticker(symbol, session=_YF_SESSION)
+        return yf.Ticker(symbol)
+    except Exception as e:
+        logger.warning(f"Ticker creation with session failed for {symbol}, retrying without session: {e}")
+        return yf.Ticker(symbol)
 
 # Global market indices
 GLOBAL_INDICES = {
@@ -75,7 +101,7 @@ def get_cpr_period_data(symbol, timeframe):
     Returns None on any failure so caller can gracefully fall back.
     """
     try:
-        ticker = yf.Ticker(symbol)
+        ticker = get_ticker(symbol)
         cpr_basis = TIMEFRAMES.get(timeframe, {}).get('cpr_basis', 'daily')
         
         if cpr_basis == 'daily':
@@ -249,7 +275,7 @@ def fetch_market_data(symbol, timeframe='15m'):
             timeframe = '15m'
         
         config = TIMEFRAMES[timeframe]
-        ticker = yf.Ticker(symbol)
+        ticker = get_ticker(symbol)
         data = ticker.history(period=config['period'], interval=config['interval'], timeout=15)
         
         if data is None or data.empty:
