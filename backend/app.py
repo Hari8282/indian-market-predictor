@@ -19,6 +19,18 @@ from types import SimpleNamespace
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+app = Flask(__name__)
+CORS(
+    app,
+    resources={
+        r"/api/*": {
+            "origins": "*",
+            "methods": ["GET", "POST", "OPTIONS"],
+            "allow_headers": ["Content-Type"],
+        }
+    },
+)
+
 # Yahoo Finance configuration
 # Do not pass custom curl_cffi sessions or monkey-patched cookie jars to yfinance.
 # yfinance manages its own compatible session internally.
