@@ -19,101 +19,17 @@ from types import SimpleNamespace
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-try:
-    from curl_cffi import requests as curl_requests
-    CURL_CFFI_AVAILABLE = True
-    logger.info("curl_cffi loaded successfully - using browser-impersonated sessions")
-except ImportError as e:
-    CURL_CFFI_AVAILABLE = False
-    logger.warning(f"curl_cffi not available ({e}) - falling back to plain yfinance requests.")
-
-# --- CRITICAL MONKEY-PATCH FOR YFINANCE + CURL_CFFI COOKIE ATTR ERROR ---
-# This patches yfinance's internal cookie parsing loop which breaks when using curl_cffi's Session.cookies structure
-try:
-    import yfinance.data as _yf_data
-    original_get_cookie_and_crumb_basic = getattr(_yf_data, "_get_cookie_and_crumb_basic", None)
-    
-    # Check if we need to patch the internal module structures
-    if hasattr(_yf_data, 'YfData'):
-        _orig_init = _yf_data.YfData.__init__
-        def _patched_init(self, *args, **kwargs):
-            _orig_init(self, *args, **kwargs)
-            # If the session belongs to curl_cffi, its cookies can return keys as strings during iterations
-            # and lack standard requests cookie objects, causing 'str' object has no attribute 'name'.
-            if hasattr(self, '_session') and self._session.__class__.__module__.startswith('curl_cffi'):
-                # Safely intercept cookie extraction or normalize how cookies expose attributes
-                pass
-        _yf_data.YfData.__init__ = _patched_init
-
-    # Global runtime interception to ensure any raw string keys fetched from cookie jars act like Cookie objects
-    def patch_yfinance_cookies():
-        import requests
-        from requests.cookies import RequestsCookieJar
-        
-        # We target the common data extraction methods where yfinance expects cookie.name and cookie.value
-        # If curl_cffi provides string objects during iteration, we map them safely using a wrapper or conversion.
-        # Alternatively, we convert the curl_cffi dict cookie jar into a native RequestsCookieJar inside the yfinance instances.
-        logger.info("Applied runtime safety wrapper for yfinance session cookies.")
-
-except Exception as patch_err:
-    logger.error(f"Failed to initialize advanced cookie patch wrappers: {patch_err}")
-# -------------------------------------------------------------------------
-
-app = Flask(__name__)
-
-CORS(app, resources={
-    r"/api/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
-    }
-})
-
-CACHE_TIMEOUT = 60
+# Yahoo Finance configuration
+# Do not pass custom curl_cffi sessions or monkey-patched cookie jars to yfinance.
+# yfinance manages its own compatible session internally.
+CURL_CFFI_AVAILABLE = False
 _YF_SESSION = None
 
 def get_yf_session():
-    """Create a fresh impersonated session for Yahoo Finance requests, if available"""
-    if not CURL_CFFI_AVAILABLE:
-        return None
-    try:
-        session = curl_requests.Session(impersonate="chrome")
-        # To bypass the 'str' object has no attribute 'name' error in yfinance, 
-        # we convert or attach a custom container or normalize cookies directly
-        # so that yfinance's loop over cookies handles actual structures cleanly.
-        return session
-    except Exception as e:
-        logger.warning(f"Could not create curl_cffi session, falling back to default: {e}")
-        return None
-
-_YF_SESSION = get_yf_session()
+    return None
 
 def get_ticker(symbol):
-    """Get a yfinance Ticker using the browser-impersonating session when available"""
-    global _YF_SESSION
-    try:
-        if _YF_SESSION is not None:
-            ticker = yf.Ticker(symbol, session=_YF_SESSION)
-            # Safety check: if curl_cffi session causes instant internal crash or holds raw strings in proxy/cookie,
-            # normalize its session cookies into standard SimpleNamespace mapping properties
-            if hasattr(_YF_SESSION, 'cookies') and hasattr(_YF_SESSION.cookies, 'get_dict'):
-                try:
-                    # Clean up local references if yfinance extracts array directly
-                    cookies_dict = _YF_SESSION.cookies.get_dict()
-                    cleaned_cookies = []
-                    for k, v in cookies_dict.items():
-                        cleaned_cookies.append(SimpleNamespace(name=k, value=v, key=k))
-                    # If yfinance internally stored a broken reference list, replace it dynamically
-                    if hasattr(ticker, '_data') and hasattr(ticker._data, '_cookie'):
-                        if isinstance(ticker._data._cookie, list):
-                            ticker._data._cookie = cleaned_cookies
-                except Exception:
-                    pass
-            return ticker
-        return yf.Ticker(symbol)
-    except Exception as e:
-        logger.warning(f"Ticker creation with session failed for {symbol}, retrying without session: {e}")
-        return yf.Ticker(symbol)
+    return yf.Ticker(symbol)
 
 GLOBAL_INDICES = {
     'asian': {
@@ -272,60 +188,41 @@ def calculate_support_resistance_with_period(symbol, timeframe, current_data):
     return support, resistance, {'basis': str(basis), 'period_label': str(period_label)}
 
 def fetch_market_data(symbol, timeframe='15m'):
-    global _YF_SESSION
+    """Fetch OHLCV safely without custom sessions or cookie monkey patches."""
     if timeframe not in TIMEFRAMES:
         timeframe = '15m'
     config = TIMEFRAMES[timeframe]
-    
+
     for attempt in range(3):
-        # On later attempts, completely discard the session to avoid persistent cookie bugs
-        active_session = _YF_SESSION if attempt == 0 else None
-        
         try:
-            # Method 1: Using Ticker history object wrapper
-            ticker = yf.Ticker(symbol, session=active_session) if active_session else yf.Ticker(symbol)
-            
-            # Defensive override: Patch cookie array if it holds primitive strings due to library mismatch
-            if hasattr(ticker, '_data') and hasattr(ticker._data, '_cookie'):
-                if isinstance(ticker._data._cookie, list):
-                    ticker._data._cookie = [
-                        SimpleNamespace(name=str(c), value=str(c)) if isinstance(c, str) else c 
-                        for c in ticker._data._cookie
-                    ]
-                    
-            data = ticker.history(period=config['period'], interval=config['interval'], timeout=12)
-            if data is not None and not data.empty:
-                if isinstance(data.columns, pd.MultiIndex):
-                    data.columns = data.columns.get_level_values(0)
-                return data
-        except Exception as e:
-            logger.warning(f"Ticker history method failed for {symbol} on attempt {attempt}: {e}")
-        
-        try:
-            # Method 2: Direct multi-download utility with forced extraction fallback
-            data = yf.download(
-                symbol,
+            ticker = yf.Ticker(symbol)
+            data = ticker.history(
                 period=config['period'],
                 interval=config['interval'],
-                session=active_session,
-                progress=False,
-                threads=False,
-                timeout=12
+                timeout=20,
+                raise_errors=False
             )
             if data is not None and not data.empty:
                 if isinstance(data.columns, pd.MultiIndex):
                     data.columns = data.columns.get_level_values(0)
                 return data
         except Exception as e:
-            logger.warning(f"Download utility method failed for {symbol} on attempt {attempt}: {e}")
-        
-        # Dynamic fallback: refresh state on first failure, step away from curl_cffi on subsequent iterations
-        if attempt == 0:
-            _YF_SESSION = get_yf_session()
-        elif attempt == 1:
-            _YF_SESSION = None # Clear and force clean standard python fallback requests
-        time.sleep(1.0)
-        
+            logger.warning(f"Yahoo history failed for {symbol}, attempt {attempt + 1}: {e}")
+
+        try:
+            data = yf.download(
+                tickers=symbol, period=config['period'], interval=config['interval'],
+                progress=False, auto_adjust=False, threads=False, timeout=20, group_by='column'
+            )
+            if data is not None and not data.empty:
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+                return data
+        except Exception as e:
+            logger.warning(f"Yahoo download failed for {symbol}, attempt {attempt + 1}: {e}")
+        time.sleep(1.5 * (attempt + 1))
+
+    logger.error(f"No market data returned for {symbol} ({timeframe})")
     return None
 
 def calculate_volume_analysis(data):
@@ -503,9 +400,10 @@ def predict_market_direction(nifty_data, global_markets, indicators):
         'global_positive_ratio': float(round(global_ratio * 100, 1))
     }
 
-def process_market_data(symbol, timeframe='15m'):
+def process_market_data(symbol, timeframe='15m', data=None):
     try:
-        data = fetch_market_data(symbol, timeframe)
+        if data is None:
+            data = fetch_market_data(symbol, timeframe)
         if data is None or len(data) == 0:
             return None
         
@@ -571,7 +469,7 @@ def get_market_data():
         if nifty_data_raw is None:
             return jsonify({'error': 'Unable to fetch Nifty data due to provider connection error.'}), 502
         
-        nifty_data = process_market_data('^NSEI', timeframe)
+        nifty_data = process_market_data('^NSEI', timeframe, data=nifty_data_raw)
         banknifty_data = process_market_data('^NSEBANK', timeframe)
         global_markets = fetch_global_markets()
         
