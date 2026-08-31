@@ -13,6 +13,8 @@ import ta
 import logging
 import time
 import os
+import requests
+import json
 from types import SimpleNamespace
 
 # Configure logging
@@ -199,42 +201,98 @@ def calculate_support_resistance_with_period(symbol, timeframe, current_data):
     ]
     return support, resistance, {'basis': str(basis), 'period_label': str(period_label)}
 
+def _normalize_yf_data(data):
+    """Normalize Yahoo/yfinance data to a simple OHLCV DataFrame."""
+    if data is None or data.empty:
+        return None
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    required = {"Open", "High", "Low", "Close"}
+    if not required.issubset(set(data.columns)):
+        return None
+    return data.dropna(subset=["Open", "High", "Low", "Close"])
+
+
+def _fetch_yahoo_chart_direct(symbol, period, interval):
+    """Fallback that calls Yahoo's chart API directly when yfinance fails."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {"range": period, "interval": interval, "includePrePost": "false"}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+        result = payload.get("chart", {}).get("result")
+        if not result:
+            return None
+        result = result[0]
+        timestamps = result.get("timestamp") or []
+        quote = (result.get("indicators", {}).get("quote") or [{}])[0]
+        if not timestamps:
+            return None
+        df = pd.DataFrame({
+            "Open": quote.get("open", []),
+            "High": quote.get("high", []),
+            "Low": quote.get("low", []),
+            "Close": quote.get("close", []),
+            "Volume": quote.get("volume", [0] * len(timestamps)),
+        }, index=pd.to_datetime(timestamps, unit="s", utc=True).tz_convert("Asia/Kolkata").tz_localize(None))
+        return _normalize_yf_data(df)
+    except (requests.RequestException, ValueError, json.JSONDecodeError) as e:
+        logger.warning(f"Direct Yahoo chart fallback failed for {symbol}: {e}")
+        return None
+
+
 def fetch_market_data(symbol, timeframe='15m'):
-    """Fetch OHLCV safely without custom sessions or cookie monkey patches."""
+    """Fetch market data with yfinance first and direct Yahoo chart fallback."""
     if timeframe not in TIMEFRAMES:
         timeframe = '15m'
     config = TIMEFRAMES[timeframe]
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             ticker = yf.Ticker(symbol)
             data = ticker.history(
                 period=config['period'],
                 interval=config['interval'],
-                timeout=20,
-                raise_errors=False
+                timeout=15,
+                raise_errors=False,
             )
+            data = _normalize_yf_data(data)
             if data is not None and not data.empty:
-                if isinstance(data.columns, pd.MultiIndex):
-                    data.columns = data.columns.get_level_values(0)
                 return data
         except Exception as e:
-            logger.warning(f"Yahoo history failed for {symbol}, attempt {attempt + 1}: {e}")
+            logger.warning(f"yfinance history failed for {symbol}: {e}")
 
         try:
             data = yf.download(
-                tickers=symbol, period=config['period'], interval=config['interval'],
-                progress=False, auto_adjust=False, threads=False, timeout=20, group_by='column'
+                tickers=symbol,
+                period=config['period'],
+                interval=config['interval'],
+                progress=False,
+                threads=False,
+                timeout=15,
+                auto_adjust=False,
             )
+            data = _normalize_yf_data(data)
             if data is not None and not data.empty:
-                if isinstance(data.columns, pd.MultiIndex):
-                    data.columns = data.columns.get_level_values(0)
                 return data
         except Exception as e:
-            logger.warning(f"Yahoo download failed for {symbol}, attempt {attempt + 1}: {e}")
-        time.sleep(1.5 * (attempt + 1))
+            logger.warning(f"yfinance download failed for {symbol}: {e}")
 
-    logger.error(f"No market data returned for {symbol} ({timeframe})")
+        data = _fetch_yahoo_chart_direct(
+            symbol,
+            config['period'],
+            config['interval'],
+        )
+        if data is not None and not data.empty:
+            logger.info(f"Direct Yahoo fallback succeeded for {symbol}")
+            return data
+
+        if attempt == 0:
+            time.sleep(1)
+
+    logger.error(f"All market-data providers failed for {symbol}")
     return None
 
 def calculate_volume_analysis(data):
