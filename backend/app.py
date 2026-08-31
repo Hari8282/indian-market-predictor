@@ -14,11 +14,23 @@ import logging
 from functools import lru_cache
 import time
 import os
-from curl_cffi import requests as curl_requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# curl_cffi is used to impersonate a real browser's TLS fingerprint so Yahoo
+# Finance doesn't block requests coming from cloud/datacenter IPs (Render,
+# Railway, etc). It's optional at import time — if it's not installed for
+# any reason, we fall back to plain yfinance requests instead of crashing.
+try:
+    from curl_cffi import requests as curl_requests
+    CURL_CFFI_AVAILABLE = True
+    logger.info("curl_cffi loaded successfully - using browser-impersonated sessions")
+except ImportError as e:
+    CURL_CFFI_AVAILABLE = False
+    logger.warning(f"curl_cffi not available ({e}) - falling back to plain yfinance requests. "
+                    f"This may cause Yahoo Finance to block requests from cloud IPs.")
 
 app = Flask(__name__)
 
@@ -35,11 +47,10 @@ CORS(app, resources={
 CACHE_TIMEOUT = 60  # seconds
 
 # Shared browser-impersonating session for all Yahoo Finance requests.
-# Yahoo Finance blocks plain/default requests (especially from cloud/datacenter
-# IPs like Render, Railway, Heroku) via Cloudflare bot detection. curl_cffi
-# impersonates a real Chrome TLS fingerprint so requests succeed reliably.
 def get_yf_session():
-    """Create a fresh impersonated session for Yahoo Finance requests"""
+    """Create a fresh impersonated session for Yahoo Finance requests, if available"""
+    if not CURL_CFFI_AVAILABLE:
+        return None
     try:
         return curl_requests.Session(impersonate="chrome")
     except Exception as e:
@@ -49,7 +60,7 @@ def get_yf_session():
 _YF_SESSION = get_yf_session()
 
 def get_ticker(symbol):
-    """Get a yfinance Ticker using the browser-impersonating session"""
+    """Get a yfinance Ticker using the browser-impersonating session when available"""
     global _YF_SESSION
     try:
         if _YF_SESSION is not None:
@@ -268,25 +279,40 @@ def calculate_support_resistance_with_period(symbol, timeframe, current_data):
 
 def fetch_market_data(symbol, timeframe='15m'):
     """
-    Fetch market data for specific timeframe
+    Fetch market data for specific timeframe.
+    Retries once with a fresh session if the first attempt fails, since
+    Yahoo Finance occasionally rejects a request even with impersonation.
     """
-    try:
-        if timeframe not in TIMEFRAMES:
-            timeframe = '15m'
-        
-        config = TIMEFRAMES[timeframe]
-        ticker = get_ticker(symbol)
-        data = ticker.history(period=config['period'], interval=config['interval'], timeout=15)
-        
-        if data is None or data.empty:
-            logger.warning(f"No data returned for {symbol} on {timeframe} (empty response from yfinance)")
-            return None
+    if timeframe not in TIMEFRAMES:
+        timeframe = '15m'
+    
+    config = TIMEFRAMES[timeframe]
+    
+    for attempt in range(2):
+        try:
+            ticker = get_ticker(symbol)
+            data = ticker.history(period=config['period'], interval=config['interval'], timeout=15)
             
-        logger.info(f"Fetched {len(data)} candles for {symbol} on {timeframe}")
-        return data
-    except Exception as e:
-        logger.error(f"Error fetching {symbol} on {timeframe}: {type(e).__name__}: {e}")
-        return None
+            if data is None or data.empty:
+                logger.warning(f"Attempt {attempt+1}: empty response for {symbol} on {timeframe}")
+                if attempt == 0:
+                    global _YF_SESSION
+                    _YF_SESSION = get_yf_session()  # fresh session before retry
+                    time.sleep(1)
+                    continue
+                return None
+            
+            logger.info(f"Fetched {len(data)} candles for {symbol} on {timeframe}")
+            return data
+        except Exception as e:
+            logger.error(f"Attempt {attempt+1} error fetching {symbol} on {timeframe}: {type(e).__name__}: {e}")
+            if attempt == 0:
+                _YF_SESSION = get_yf_session()
+                time.sleep(1)
+                continue
+            return None
+    
+    return None
 
 def calculate_cpr(data):
     """Calculate Central Pivot Range"""
