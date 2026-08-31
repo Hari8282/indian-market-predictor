@@ -39,6 +39,9 @@ CORS(
 CURL_CFFI_AVAILABLE = False
 _YF_SESSION = None
 
+_MARKET_CACHE = {}
+MARKET_CACHE_TTL = 45
+
 def get_yf_session():
     return None
 
@@ -244,9 +247,15 @@ def _fetch_yahoo_chart_direct(symbol, period, interval):
 
 
 def fetch_market_data(symbol, timeframe='15m'):
-    """Fetch market data with yfinance first and direct Yahoo chart fallback."""
+    """Fetch market data with retries, direct Yahoo fallback, and short cache."""
     if timeframe not in TIMEFRAMES:
         timeframe = '15m'
+
+    cache_key = (symbol, timeframe)
+    cached = _MARKET_CACHE.get(cache_key)
+    if cached and (time.time() - cached["timestamp"] < MARKET_CACHE_TTL):
+        return cached["data"].copy()
+
     config = TIMEFRAMES[timeframe]
 
     for attempt in range(2):
@@ -260,6 +269,7 @@ def fetch_market_data(symbol, timeframe='15m'):
             )
             data = _normalize_yf_data(data)
             if data is not None and not data.empty:
+                _MARKET_CACHE[cache_key] = {"timestamp": time.time(), "data": data.copy()}
                 return data
         except Exception as e:
             logger.warning(f"yfinance history failed for {symbol}: {e}")
@@ -276,6 +286,7 @@ def fetch_market_data(symbol, timeframe='15m'):
             )
             data = _normalize_yf_data(data)
             if data is not None and not data.empty:
+                _MARKET_CACHE[cache_key] = {"timestamp": time.time(), "data": data.copy()}
                 return data
         except Exception as e:
             logger.warning(f"yfinance download failed for {symbol}: {e}")
@@ -287,6 +298,7 @@ def fetch_market_data(symbol, timeframe='15m'):
         )
         if data is not None and not data.empty:
             logger.info(f"Direct Yahoo fallback succeeded for {symbol}")
+            _MARKET_CACHE[cache_key] = {"timestamp": time.time(), "data": data.copy()}
             return data
 
         if attempt == 0:
@@ -518,7 +530,7 @@ def predict_market_direction(nifty_data, global_markets, indicators):
         'global_positive_ratio': float(round(global_ratio * 100, 1))
     }
 
-def process_market_data(symbol, timeframe='15m', data=None):
+def process_market_data(symbol, timeframe='15m', prediction=None, data=None):
     try:
         if data is None:
             data = fetch_market_data(symbol, timeframe)
@@ -591,19 +603,39 @@ def get_market_data():
         timeframe = request.args.get('timeframe', '15m')
         if timeframe not in TIMEFRAMES:
             return jsonify({'error': 'Invalid timeframe'}), 400
-        
+
+        # Fetch Nifty once and reuse the same dataframe throughout this request.
         nifty_data_raw = fetch_market_data('^NSEI', timeframe)
-        if nifty_data_raw is None:
-            return jsonify({'error': 'Unable to fetch Nifty data due to provider connection error.'}), 502
-        
-        nifty_data = process_market_data('^NSEI', timeframe, data=nifty_data_raw)
-        banknifty_data = process_market_data('^NSEBANK', timeframe, prediction)
+
+        # Global markets are used to calculate the market prediction.
         global_markets = fetch_global_markets()
-        
-        # Safeguard if internal loops generated partial structures
-        nifty_indicators = nifty_data.get('indicators', {}) if nifty_data else {}
-        prediction = predict_market_direction(nifty_data_raw, global_markets, nifty_indicators)
-        
+
+        nifty_indicators = (
+            calculate_technical_indicators(nifty_data_raw)
+            if nifty_data_raw is not None else {}
+        )
+
+        prediction = predict_market_direction(
+            nifty_data_raw,
+            global_markets,
+            nifty_indicators
+        )
+
+        nifty_data = process_market_data(
+            '^NSEI',
+            timeframe,
+            prediction=prediction,
+            data=nifty_data_raw
+        ) if nifty_data_raw is not None else None
+
+        banknifty_data = process_market_data(
+            '^NSEBANK',
+            timeframe,
+            prediction=prediction
+        )
+
+        provider_available = nifty_data_raw is not None
+
         return jsonify({
             'timeframe': timeframe,
             'timeframe_label': TIMEFRAMES[timeframe]['label'],
@@ -613,11 +645,18 @@ def get_market_data():
             'bankNifty': banknifty_data,
             'timestamp': datetime.now().isoformat(),
             'market_status': get_market_status(),
-            'status': 'success'
+            'status': 'success' if provider_available else 'degraded',
+            'data_provider_status': (
+                'available' if provider_available else 'temporarily_unavailable'
+            )
         })
     except Exception as e:
-        logger.error(f"Global handler exception: {e}")
-        return jsonify({'error': str(e), 'status': 'error'}), 500
+        logger.exception("Global handler exception")
+        return jsonify({
+            'error': 'Internal market data processing error',
+            'details': str(e),
+            'status': 'error'
+        }), 500
 
 def get_market_status():
     now = datetime.now()
