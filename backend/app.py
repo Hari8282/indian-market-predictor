@@ -280,8 +280,10 @@ def calculate_support_resistance_with_period(symbol, timeframe, current_data):
 def fetch_market_data(symbol, timeframe='15m'):
     """
     Fetch market data for specific timeframe.
-    Retries once with a fresh session if the first attempt fails, since
-    Yahoo Finance occasionally rejects a request even with impersonation.
+    Tries Ticker.history() first, then falls back to yf.download() which
+    uses a different internal code path and sometimes succeeds when the
+    Ticker-based approach fails against Yahoo's current API behavior.
+    Retries once with a fresh session if both fail initially.
     """
     if timeframe not in TIMEFRAMES:
         timeframe = '15m'
@@ -289,29 +291,45 @@ def fetch_market_data(symbol, timeframe='15m'):
     config = TIMEFRAMES[timeframe]
     
     for attempt in range(2):
+        # Method 1: Ticker.history()
         try:
             ticker = get_ticker(symbol)
             data = ticker.history(period=config['period'], interval=config['interval'], timeout=15)
             
-            if data is None or data.empty:
-                logger.warning(f"Attempt {attempt+1}: empty response for {symbol} on {timeframe}")
-                if attempt == 0:
-                    global _YF_SESSION
-                    _YF_SESSION = get_yf_session()  # fresh session before retry
-                    time.sleep(1)
-                    continue
-                return None
-            
-            logger.info(f"Fetched {len(data)} candles for {symbol} on {timeframe}")
-            return data
+            if data is not None and not data.empty:
+                logger.info(f"[Ticker method] Fetched {len(data)} candles for {symbol} on {timeframe}")
+                return data
+            logger.warning(f"[Ticker method] Attempt {attempt+1}: empty response for {symbol} on {timeframe}")
         except Exception as e:
-            logger.error(f"Attempt {attempt+1} error fetching {symbol} on {timeframe}: {type(e).__name__}: {e}")
-            if attempt == 0:
-                _YF_SESSION = get_yf_session()
-                time.sleep(1)
-                continue
-            return None
+            logger.warning(f"[Ticker method] Attempt {attempt+1} error for {symbol}: {type(e).__name__}: {e}")
+        
+        # Method 2: yf.download() fallback
+        try:
+            data = yf.download(
+                symbol,
+                period=config['period'],
+                interval=config['interval'],
+                session=_YF_SESSION,
+                progress=False,
+                threads=False
+            )
+            if data is not None and not data.empty:
+                # yf.download() with a single symbol can return MultiIndex columns; flatten if needed
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+                logger.info(f"[Download method] Fetched {len(data)} candles for {symbol} on {timeframe}")
+                return data
+            logger.warning(f"[Download method] Attempt {attempt+1}: empty response for {symbol} on {timeframe}")
+        except Exception as e:
+            logger.warning(f"[Download method] Attempt {attempt+1} error for {symbol}: {type(e).__name__}: {e}")
+        
+        # Both methods failed this attempt - refresh session and retry once
+        if attempt == 0:
+            global _YF_SESSION
+            _YF_SESSION = get_yf_session()
+            time.sleep(1.5)
     
+    logger.error(f"All fetch methods exhausted for {symbol} on {timeframe}")
     return None
 
 def calculate_cpr(data):
@@ -714,28 +732,49 @@ def debug_yfinance():
         result['aapl_error_message'] = str(e)
     
     # Test 3: Raw HTTP check to Yahoo's endpoint directly (bypassing yfinance)
+    # and inspect the actual body content, since a 200 status can still carry
+    # an error payload from Yahoo (crumb/cookie mismatch, rate-limit notice, etc)
     try:
         if CURL_CFFI_AVAILABLE:
             test_session = curl_requests.Session(impersonate="chrome")
             resp = test_session.get(
-                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=5d&interval=1d",
                 timeout=15
             )
             result['raw_http_status'] = resp.status_code
             result['raw_http_success'] = resp.status_code == 200
+            body_text = resp.text
+            result['raw_body_preview'] = body_text[:500]
+            result['raw_body_has_error_field'] = '"error"' in body_text and '"error":null' not in body_text
         else:
             import urllib.request
             req = urllib.request.Request(
-                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=5d&interval=1d",
                 headers={'User-Agent': 'Mozilla/5.0'}
             )
             resp = urllib.request.urlopen(req, timeout=15)
+            body_text = resp.read().decode('utf-8', errors='replace')
             result['raw_http_status'] = resp.status
             result['raw_http_success'] = resp.status == 200
+            result['raw_body_preview'] = body_text[:500]
+            result['raw_body_has_error_field'] = '"error"' in body_text and '"error":null' not in body_text
     except Exception as e:
         result['raw_http_success'] = False
         result['raw_http_error_type'] = type(e).__name__
         result['raw_http_error_message'] = str(e)
+    
+    # Test 4: Try yf.download() as an alternate fetch path - this uses a
+    # different internal code route than Ticker.history() and sometimes
+    # succeeds when the Ticker-based path fails
+    try:
+        dl_data = yf.download('AAPL', period='5d', interval='1d', 
+                                session=_YF_SESSION, progress=False, threads=False)
+        result['download_method_success'] = dl_data is not None and not dl_data.empty
+        result['download_method_rows'] = int(len(dl_data)) if dl_data is not None else 0
+    except Exception as e:
+        result['download_method_success'] = False
+        result['download_method_error_type'] = type(e).__name__
+        result['download_method_error_message'] = str(e)
     
     return jsonify(result)
 
