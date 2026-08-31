@@ -678,6 +678,67 @@ def fetch_global_markets():
     
     return global_markets
 
+@app.route('/api/debug', methods=['GET'])
+def debug_yfinance():
+    """
+    Diagnostic endpoint to pinpoint exactly why Yahoo Finance fetches fail.
+    Safe to expose - no sensitive data, just connectivity diagnostics.
+    """
+    result = {
+        'curl_cffi_available': CURL_CFFI_AVAILABLE,
+        'session_created': _YF_SESSION is not None,
+        'yfinance_version': getattr(yf, '__version__', 'unknown')
+    }
+    
+    # Test 1: Try fetching Nifty (the symbol that's failing)
+    try:
+        ticker = get_ticker('^NSEI')
+        data = ticker.history(period='5d', interval='15m', timeout=15)
+        result['nifty_fetch_success'] = data is not None and not data.empty
+        result['nifty_rows'] = int(len(data)) if data is not None else 0
+    except Exception as e:
+        result['nifty_fetch_success'] = False
+        result['nifty_error_type'] = type(e).__name__
+        result['nifty_error_message'] = str(e)
+    
+    # Test 2: Try a well-known US ticker to isolate whether it's Yahoo-wide
+    # blocking or specific to NSE/Indian symbols
+    try:
+        ticker2 = get_ticker('AAPL')
+        data2 = ticker2.history(period='5d', interval='1d', timeout=15)
+        result['aapl_fetch_success'] = data2 is not None and not data2.empty
+        result['aapl_rows'] = int(len(data2)) if data2 is not None else 0
+    except Exception as e:
+        result['aapl_fetch_success'] = False
+        result['aapl_error_type'] = type(e).__name__
+        result['aapl_error_message'] = str(e)
+    
+    # Test 3: Raw HTTP check to Yahoo's endpoint directly (bypassing yfinance)
+    try:
+        if CURL_CFFI_AVAILABLE:
+            test_session = curl_requests.Session(impersonate="chrome")
+            resp = test_session.get(
+                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                timeout=15
+            )
+            result['raw_http_status'] = resp.status_code
+            result['raw_http_success'] = resp.status_code == 200
+        else:
+            import urllib.request
+            req = urllib.request.Request(
+                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            resp = urllib.request.urlopen(req, timeout=15)
+            result['raw_http_status'] = resp.status
+            result['raw_http_success'] = resp.status == 200
+    except Exception as e:
+        result['raw_http_success'] = False
+        result['raw_http_error_type'] = type(e).__name__
+        result['raw_http_error_message'] = str(e)
+    
+    return jsonify(result)
+
 @app.route('/api/market-data', methods=['GET'])
 def get_market_data():
     """
