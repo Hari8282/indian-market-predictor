@@ -21,16 +21,20 @@ logger = logging.getLogger(__name__)
 
 # curl_cffi is used to impersonate a real browser's TLS fingerprint so Yahoo
 # Finance doesn't block requests coming from cloud/datacenter IPs (Render,
-# Railway, etc). It's optional at import time — if it's not installed for
-# any reason, we fall back to plain yfinance requests instead of crashing.
+# Railway, etc). As of yfinance 0.2.41+, yfinance AUTO-DETECTS curl_cffi
+# internally the moment it's installed and uses its own Chrome-impersonated
+# client automatically - manually constructing and injecting a session
+# object conflicts with that internal client and silently breaks parsing.
+# So we only need to confirm curl_cffi is importable; we do NOT pass a
+# custom session to Ticker()/download() calls below.
 try:
     from curl_cffi import requests as curl_requests
     CURL_CFFI_AVAILABLE = True
-    logger.info("curl_cffi loaded successfully - using browser-impersonated sessions")
+    logger.info("curl_cffi is installed - yfinance will use it automatically for browser impersonation")
 except ImportError as e:
     CURL_CFFI_AVAILABLE = False
-    logger.warning(f"curl_cffi not available ({e}) - falling back to plain yfinance requests. "
-                    f"This may cause Yahoo Finance to block requests from cloud IPs.")
+    logger.warning(f"curl_cffi not available ({e}) - yfinance will use plain requests, "
+                    f"which may be blocked by Yahoo Finance on cloud IPs.")
 
 app = Flask(__name__)
 
@@ -46,29 +50,13 @@ CORS(app, resources={
 # Cache configuration
 CACHE_TIMEOUT = 60  # seconds
 
-# Shared browser-impersonating session for all Yahoo Finance requests.
-def get_yf_session():
-    """Create a fresh impersonated session for Yahoo Finance requests, if available"""
-    if not CURL_CFFI_AVAILABLE:
-        return None
-    try:
-        return curl_requests.Session(impersonate="chrome")
-    except Exception as e:
-        logger.warning(f"Could not create curl_cffi session, falling back to default: {e}")
-        return None
-
-_YF_SESSION = get_yf_session()
-
 def get_ticker(symbol):
-    """Get a yfinance Ticker using the browser-impersonating session when available"""
-    global _YF_SESSION
-    try:
-        if _YF_SESSION is not None:
-            return yf.Ticker(symbol, session=_YF_SESSION)
-        return yf.Ticker(symbol)
-    except Exception as e:
-        logger.warning(f"Ticker creation with session failed for {symbol}, retrying without session: {e}")
-        return yf.Ticker(symbol)
+    """
+    Get a yfinance Ticker. We deliberately do NOT pass a custom session -
+    yfinance handles curl_cffi impersonation internally when the package
+    is installed, and passing our own session object breaks that.
+    """
+    return yf.Ticker(symbol)
 
 # Global market indices
 GLOBAL_INDICES = {
