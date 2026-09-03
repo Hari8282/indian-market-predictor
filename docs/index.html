@@ -713,7 +713,36 @@
                 font-size: 16px;
             }
         }
+
+        /* Strategy Signal */
+        .strategy-section { margin: 16px 0; }
+        .strategy-card { background: linear-gradient(135deg, #111827, #1f2937); border: 1px solid rgba(148,163,184,.22); border-radius: 16px; padding: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+        .strategy-top { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+        .strategy-title { font-weight:800; letter-spacing:.04em; color:#e5e7eb; }
+        .strategy-badge { font-size:24px; font-weight:900; padding:8px 16px; border-radius:999px; }
+        .strategy-badge.buy { background:rgba(16,185,129,.18); color:#34d399; border:1px solid rgba(52,211,153,.45); }
+        .strategy-badge.sell { background:rgba(239,68,68,.18); color:#f87171; border:1px solid rgba(248,113,113,.45); }
+        .strategy-badge.hold { background:rgba(245,158,11,.18); color:#fbbf24; border:1px solid rgba(251,191,36,.45); }
+        .strategy-meta { display:flex; gap:8px; flex-wrap:wrap; }
+        .strategy-pill { background:rgba(148,163,184,.12); color:#cbd5e1; border-radius:999px; padding:5px 9px; font-size:12px; }
+        .strategy-grid { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:10px; margin:12px 0; }
+        .strategy-value { background:rgba(255,255,255,.045); border-radius:10px; padding:10px; }
+        .strategy-value span { display:block; color:#94a3b8; font-size:11px; margin-bottom:4px; }
+        .strategy-value strong { font-size:15px; color:#f8fafc; }
+        .structure-row { display:flex; gap:7px; flex-wrap:wrap; margin:10px 0; }
+        .structure-tag { padding:5px 8px; border-radius:7px; background:rgba(139,92,246,.14); color:#c4b5fd; font-weight:700; font-size:12px; }
+        .strategy-reasons { margin:10px 0 0; padding-left:18px; color:#cbd5e1; font-size:12px; line-height:1.6; }
+        .strategy-empty { color:#94a3b8; padding:12px 0; }
+        @media (max-width:600px){ .strategy-card{padding:13px}.strategy-grid{grid-template-columns:1fr 1fr}.strategy-value:last-child{grid-column:span 2}.strategy-badge{font-size:19px;padding:7px 12px} }
+
     </style>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+#proChartPanel{background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.18);padding:12px;border-radius:14px}
+#tradingChart{background:#0f172a}
+.chart-badge{padding:4px 8px;border-radius:999px;background:rgba(148,163,184,.12)}
+@media(max-width:640px){#tradingChart{height:430px!important}#proChartPanel{padding:8px}}
+</style>
 </head>
 <body>
     <div class="loading-overlay" id="loadingOverlay">
@@ -836,6 +865,14 @@
                 </div>
             </div>
 
+
+            <!-- HH/HL/LH/LL + CPR + Support/Resistance Strategy -->
+            <div class="strategy-section">
+                <div class="strategy-card" id="strategyCard">
+                    <div class="strategy-empty">Loading strategy signal...</div>
+                </div>
+            </div>
+
             <!-- Chart Section -->
             <div class="chart-section">
                 <div class="chart-header">
@@ -864,7 +901,16 @@
                 </div>
 
                 <div class="chart-wrapper">
-                    <canvas id="chartCanvas"></canvas>
+                    
+<div id="proChartPanel" style="margin:16px 0;">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
+    <strong id="proChartTitle">Nifty 50 • Market Structure</strong>
+    <span id="proChartStatus">Loading…</span>
+  </div>
+  <div id="tradingChart" style="width:100%;height:520px;border-radius:12px;overflow:hidden;"></div>
+  <div id="chartLegend" style="display:flex;flex-wrap:wrap;gap:10px;font-size:12px;margin-top:8px;"></div>
+</div>
+
                 </div>
             </div>
         </div>
@@ -885,7 +931,29 @@
         
         // API URL - Configurable for deployment
         // Change this to your deployed backend URL (e.g., Render, Railway)
-        let API_BASE_URL = localStorage.getItem('apiBaseUrl') || 'http://localhost:5000';
+        const DEFAULT_RENDER_URL = "https://indian-market-predictor-api.onrender.com";
+let API_BASE_URL = localStorage.getItem('apiBaseUrl') || (
+    ['localhost','127.0.0.1'].includes(window.location.hostname)
+        ? 'http://127.0.0.1:5000'
+        : DEFAULT_RENDER_URL
+);
+
+function normalizeApiBase(url) {
+    return String(url || '').trim().replace(/\/$/, '').replace(/\/api\/market-data$/, '');
+}
+
+function getApiUrl() {
+    const base = normalizeApiBase(API_BASE_URL);
+    return `${base}/api/market-data`;
+}
+
+function setConnection(connected, message) {
+    const statusIndicator = document.getElementById('statusIndicator');
+    const connectionStatus = document.getElementById('connectionStatus');
+    if (statusIndicator) statusIndicator.classList.remove('loading', 'error');
+    if (!connected && statusIndicator) statusIndicator.classList.add('error');
+    if (connectionStatus) connectionStatus.textContent = message || (connected ? 'Connected' : 'Offline');
+}
         
         function getApiUrl() {
             return `${API_BASE_URL}/api/market-data`;
@@ -905,7 +973,7 @@
         function saveApiUrl() {
             const url = document.getElementById('apiUrlInput').value.trim();
             if (url) {
-                API_BASE_URL = url.replace(/\/$/, '');
+                API_BASE_URL = normalizeApiBase(url);
                 localStorage.setItem('apiBaseUrl', API_BASE_URL);
                 document.getElementById('configBanner').classList.remove('show');
                 fetchMarketData();
@@ -986,49 +1054,65 @@
             const loadingOverlay = document.getElementById('loadingOverlay');
             const loadingStatus = document.getElementById('loadingStatus');
             const refreshBtn = document.getElementById('refreshBtn');
-            const statusIndicator = document.getElementById('statusIndicator');
-            const connectionStatus = document.getElementById('connectionStatus');
-            
-            if (!autoRefresh) {
-                loadingOverlay.classList.add('show');
-            }
-            
-            loadingStatus.textContent = `Fetching ${currentTimeframe.toUpperCase()} data...`;
-            refreshBtn.disabled = true;
-            statusIndicator.classList.add('loading');
-            connectionStatus.textContent = 'Fetching...';
+
+            if (!autoRefresh && loadingOverlay) loadingOverlay.classList.add('show');
+            if (loadingStatus) loadingStatus.textContent = `Fetching ${currentTimeframe.toUpperCase()} data...`;
+            if (refreshBtn) refreshBtn.disabled = true;
+
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 20000);
 
             try {
-                const response = await fetch(`${getApiUrl()}?timeframe=${currentTimeframe}`);
-                
-                if (!response.ok) {
-                    throw new Error('Backend not responding');
+                const url = `${getApiUrl()}?timeframe=${encodeURIComponent(currentTimeframe)}&_=${Date.now()}`;
+                const response = await fetch(url, {
+                    method: 'GET',
+                    mode: 'cors',
+                    cache: 'no-store',
+                    headers: { 'Accept': 'application/json' },
+                    signal: controller.signal
+                });
+
+                const raw = await response.text();
+                let payload;
+                try { payload = JSON.parse(raw); }
+                catch (_) { throw new Error(`Invalid JSON from backend (HTTP ${response.status})`); }
+
+                if (!response.ok) throw new Error(payload.error || payload.message || `Backend HTTP ${response.status}`);
+
+                // Support both direct and wrapped backend payloads.
+                marketData = payload.data || payload;
+                if (!marketData.nifty && !marketData.bankNifty && !marketData.banknifty) {
+                    throw new Error('Backend response has no Nifty or Bank Nifty market data');
                 }
-                
-                marketData = await response.json();
-                
-                statusIndicator.classList.remove('loading', 'error');
-                connectionStatus.textContent = 'Connected';
-                document.getElementById('configBanner').classList.remove('show');
-                
+
+                setConnection(true, 'Connected');
+                document.getElementById('configBanner')?.classList.remove('show');
+
                 updateUI();
-                
-                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
-                    
-                if (autoRefresh) {
-                    secondsRemaining = REFRESH_SECONDS;
+
+                // Render professional chart after the existing UI is updated.
+                const market = currentChart === 'banknifty'
+                    ? (marketData.bankNifty || marketData.banknifty)
+                    : (marketData.nifty || marketData.bankNifty || marketData.banknifty);
+
+                if (typeof renderProfessionalChart === 'function' && market) {
+                    renderProfessionalChart(market, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
                 }
-                
+
+                // Fallback to original canvas chart if professional chart cannot render.
+                // Legacy canvas chart is intentionally disabled; Lightweight Charts is the renderer.
+                const legacyCanvas = null;
+
+                if (loadingStatus) loadingStatus.textContent = 'Market data updated';
             } catch (error) {
-                console.error('Error:', error);
-                statusIndicator.classList.remove('loading');
-                statusIndicator.classList.add('error');
-                connectionStatus.textContent = 'Backend Offline';
-                document.getElementById('configBanner').classList.add('show');
-                
+                console.error('Market API error:', error);
+                setConnection(false, `Offline: ${error.message}`);
+                document.getElementById('configBanner')?.classList.add('show');
+                if (loadingStatus) loadingStatus.textContent = error.message;
             } finally {
-                loadingOverlay.classList.remove('show');
-                refreshBtn.disabled = false;
+                clearTimeout(timeout);
+                if (refreshBtn) refreshBtn.disabled = false;
+                if (!autoRefresh && loadingOverlay) loadingOverlay.classList.remove('show');
             }
         }
 
@@ -1040,6 +1124,7 @@
             updatePrediction();
             updateGlobalMarkets();
             updateIndicators();
+            updateStrategySignal();
             updateChart();
         }
 
@@ -1232,6 +1317,42 @@
             return { width: wrapper.offsetWidth, height: 450 };
         }
 
+
+        function updateStrategySignal() {
+            const container = document.getElementById('strategyCard');
+            const market = currentChart === 'nifty' ? marketData?.nifty : marketData?.bankNifty;
+            const signal = market?.tradeSignal;
+            const structure = market?.marketStructure;
+            if (!market || !signal) {
+                container.innerHTML = '<div class="strategy-empty">Strategy signal is unavailable. Check that the updated backend is deployed.</div>';
+                return;
+            }
+            const side = String(signal.signal || 'HOLD').toUpperCase();
+            const sideClass = side.toLowerCase();
+            const icon = side === 'BUY' ? '🟢' : side === 'SELL' ? '🔴' : '🟡';
+            const fmt = v => (v === null || v === undefined || Number.isNaN(Number(v))) ? '--' : '₹' + Number(v).toLocaleString('en-IN', {maximumFractionDigits: 2});
+            const structureTags = (structure?.structure || []).slice(-8).map(x => `<span class="structure-tag">${x.type} · ${fmt(x.price)}</span>`).join('') || `<span class="structure-tag">${String(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span>`;
+            const reasons = (signal.reasons || []).map(r => `<li>✓ ${r}</li>`).join('') || '<li>Waiting for enough confirmation.</li>';
+            const prediction = marketData?.prediction || {};
+            container.innerHTML = `
+                <div class="strategy-top">
+                    <div>
+                        <div class="strategy-title">🎯 ${currentChart === 'nifty' ? 'NIFTY 50' : 'BANK NIFTY'} STRATEGY SIGNAL</div>
+                        <div class="strategy-meta"><span class="strategy-pill">Prediction: ${(prediction.direction || 'neutral').toUpperCase()}</span><span class="strategy-pill">CPR: ${(signal.cprPosition || 'inside').toUpperCase()}</span><span class="strategy-pill">Score: ${signal.score ?? '--'}</span></div>
+                    </div>
+                    <div class="strategy-badge ${sideClass}">${icon} ${side}</div>
+                </div>
+                <div class="strategy-meta"><span class="strategy-pill">Strength: ${(signal.strength || 'weak').toUpperCase()}</span><span class="strategy-pill">Confidence: ${signal.confidence ?? '--'}%</span><span class="strategy-pill">Structure: ${(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span></div>
+                <div class="strategy-grid">
+                    <div class="strategy-value"><span>ENTRY</span><strong>${fmt(signal.entry ?? market.current)}</strong></div>
+                    <div class="strategy-value"><span>STOP LOSS</span><strong>${fmt(signal.stopLoss)}</strong></div>
+                    <div class="strategy-value"><span>TARGET</span><strong>${fmt(signal.target)}</strong></div>
+                </div>
+                <div class="structure-row">${structureTags}</div>
+                <div class="strategy-meta"><span class="strategy-pill">Support: ${fmt(signal.nearestSupport?.value)}</span><span class="strategy-pill">Resistance: ${fmt(signal.nearestResistance?.value)}</span></div>
+                <ul class="strategy-reasons">${reasons}</ul>`;
+        }
+
         function updateChart() {
             const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
             const marketName = currentChart === 'nifty' ? 'Nifty 50' : 'Bank Nifty';
@@ -1248,7 +1369,8 @@
 
         function drawChart(market) {
             const canvas = document.getElementById('chartCanvas');
-            const ctx = canvas.getContext('2d');
+            if (!canvas) { return; }
+        const ctx = canvas.getContext('2d');
             const dpr = window.devicePixelRatio || 1;
             const size = getCanvasSize();
             
@@ -1268,9 +1390,16 @@
             ctx.clearRect(0, 0, width, height);
             
             const data = market.candleData;
-            const maxPrice = Math.max(...data.map(c => parseFloat(c.high)));
-            const minPrice = Math.min(...data.map(c => parseFloat(c.low)));
-            const priceRange = maxPrice - minPrice;
+            const levelValues = [
+                ...(market.support || []), ...(market.resistance || []),
+                market.cpr?.pivot, market.cpr?.tc, market.cpr?.bc
+            ].map(x => parseFloat(typeof x === 'object' ? x.value : x)).filter(Number.isFinite);
+            const rawMax = Math.max(...data.map(c => parseFloat(c.high)), ...levelValues);
+            const rawMin = Math.min(...data.map(c => parseFloat(c.low)), ...levelValues);
+            const padding = Math.max((rawMax - rawMin) * 0.08, 1);
+            const maxPrice = rawMax + padding;
+            const minPrice = rawMin - padding;
+            const priceRange = Math.max(maxPrice - minPrice, 1);
             const candleWidth = Math.max(2, Math.min(isMobile ? 8 : 12, width / data.length - 2));
             const spacing = width / (data.length + 1);
             
@@ -1445,6 +1574,7 @@
             document.getElementById('btnBankNifty').classList.toggle('active', chart === 'banknifty');
             if (marketData) {
                 updateIndicators();
+                updateStrategySignal();
                 updateChart();
             }
         }
@@ -1488,5 +1618,202 @@
             stopAutoRefresh();
         });
     </script>
+
+<script>
+let tvChart=null, candleSeries=null, volumeSeries=null;
+
+function resetTradingChart(){
+  const el=document.getElementById('tradingChart');
+  if(!el || !window.LightweightCharts) return null;
+  el.innerHTML='';
+  tvChart=LightweightCharts.createChart(el,{
+    width:el.clientWidth,height:el.clientHeight,
+    layout:{background:{type:'solid',color:'#0f172a'},textColor:'#cbd5e1'},
+    grid:{vertLines:{color:'rgba(148,163,184,.08)'},horzLines:{color:'rgba(148,163,184,.08)'}},
+    rightPriceScale:{borderColor:'rgba(148,163,184,.2)'},
+    timeScale:{borderColor:'rgba(148,163,184,.2)',timeVisible:true,secondsVisible:false},
+    crosshair:{mode:LightweightCharts.CrosshairMode.Normal}
+  });
+  candleSeries=tvChart.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderVisible:false,wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
+  volumeSeries=tvChart.addHistogramSeries({priceFormat:{type:'volume'},priceScaleId:'volume'});
+  volumeSeries.priceScale().applyOptions({scaleMargins:{top:.8,bottom:0}});
+  new ResizeObserver(()=>tvChart&&tvChart.applyOptions({width:el.clientWidth,height:el.clientHeight})).observe(el);
+  return tvChart;
+}
+function lineOverlay(name,value,opts={}){
+  if(!candleSeries || value===undefined || value===null || Number.isNaN(Number(value))) return;
+  candleSeries.createPriceLine({price:Number(value),color:opts.color||'#64748b',lineWidth:opts.width||1,lineStyle:opts.style||LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:name});
+}
+function renderProfessionalChart(market,name){
+  market=normalizeMarketForChart(market);
+  if(!market) return;
+  const candles=market.candleData||market.candles||market.candlestickData||market.chartData||market.ohlcv||[];
+  if(!candles.length){
+    document.getElementById('proChartStatus').textContent='No candleData received from API';
+    console.error('Chart payload:', market);
+    return;
+}
+  resetTradingChart();
+  const normalized=candles.map(x=>({time:Number(x.time),open:Number(x.open),high:Number(x.high),low:Number(x.low),close:Number(x.close)})).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.open));
+  candleSeries.setData(normalized);
+  volumeSeries.setData(candles.map(x=>({time:Number(x.time),value:Number(x.volume||0),color:Number(x.close)>=Number(x.open)?'rgba(34,197,94,.35)':'rgba(239,68,68,.35)'})).filter(x=>Number.isFinite(x.time)));
+  const o=market.chartOverlays||{};
+  (o.cpr||[]).forEach(x=>lineOverlay(x.name,x.value,{color:'#38bdf8',style:LightweightCharts.LineStyle.Solid}));
+  (o.support||[]).forEach(x=>lineOverlay(x.level,x.value,{color:'#22c55e'}));
+  (o.resistance||[]).forEach(x=>lineOverlay(x.level,x.value,{color:'#ef4444'}));
+  const markers=(o.structureMarkers||[]).map(x=>({
+    time:Number(x.time)||Math.floor(new Date(x.timestamp).getTime()/1000),
+    position:(x.type==='HH'||x.type==='LH')?'aboveBar':'belowBar',
+    color:(x.type==='HH'||x.type==='HL')?'#22c55e':'#ef4444',
+    shape:(x.type==='HH'||x.type==='HL')?'arrowUp':'arrowDown',
+    text:x.type
+  })).filter(x=>Number.isFinite(x.time));
+  if(candleSeries.setMarkers) candleSeries.setMarkers(markers);
+  const sig=market.tradeSignal||{};
+  if(sig.entry && sig.signal && sig.signal!=='HOLD'){
+    lineOverlay(sig.signal+' ENTRY',sig.entry,{color:sig.signal==='BUY'?'#22c55e':'#ef4444',width:2,style:LightweightCharts.LineStyle.Solid});
+    lineOverlay('STOP LOSS',sig.stopLoss,{color:'#f59e0b'});
+    lineOverlay('TARGET',sig.target,{color:'#a78bfa'});
+  }
+  tvChart.timeScale().fitContent();
+  document.getElementById('proChartTitle').textContent=(name||'Market')+' • Trading Chart';
+  document.getElementById('proChartStatus').textContent=(market.marketStructure?.valid===false)?'Waiting for 20 candles':'Live structure';
+  document.getElementById('chartLegend').innerHTML='<span class="chart-badge">Candles</span><span class="chart-badge">CPR</span><span class="chart-badge">Support/Resistance</span><span class="chart-badge">HH HL LH LL</span><span class="chart-badge">'+(sig.signal||'HOLD')+'</span>';
+}
+</script>
+
+
+<script>
+(function(){
+  function currentMarketFromPayload(payload){
+    const active=(window.currentMarket||window.selectedMarket||'nifty').toLowerCase();
+    if(active.includes('bank')) return payload.bankNifty||payload.banknifty||payload.nifty;
+    return payload.nifty||payload.bankNifty||payload.banknifty;
+  }
+  const originalFetch=window.fetchMarketData;
+  if(typeof originalFetch==='function'){
+    window.fetchMarketData=async function(){
+      const result=await originalFetch.apply(this,arguments);
+      const payload=result||window.marketData||window.lastMarketData;
+      if(payload && (payload.nifty||payload.bankNifty||payload.banknifty)){
+        const m=currentMarketFromPayload(payload);
+        renderProfessionalChart(m, m===payload.nifty?'Nifty 50':'Bank Nifty');
+      }
+      return result;
+    };
+  }
+  window.renderProfessionalChartFromApi=function(payload,marketName){
+    const m=marketName==='Bank Nifty'?(payload.bankNifty||payload.banknifty):(payload.nifty||payload.bankNifty);
+    renderProfessionalChart(m,marketName);
+  };
+})();
+</script>
+
+
+<script>
+(function () {
+    const PRODUCTION_PLACEHOLDER = 'REPLACE-WITH-YOUR-RENDER-SERVICE.onrender.com';
+
+    function activeMarket() {
+        if (!window.marketData) return null;
+        return window.currentChart === 'banknifty'
+            ? (window.marketData.bankNifty || window.marketData.banknifty)
+            : (window.marketData.nifty || window.marketData.bankNifty || window.marketData.banknifty);
+    }
+
+    // Re-render the professional chart whenever Nifty/Bank Nifty is switched.
+    const oldSwitch = window.switchChart;
+    if (typeof oldSwitch === 'function') {
+        window.switchChart = function (chart) {
+            const result = oldSwitch.apply(this, arguments);
+            setTimeout(() => {
+                const m = activeMarket();
+                if (m && typeof window.renderProfessionalChart === 'function') {
+                    window.renderProfessionalChart(m, chart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
+                }
+            }, 0);
+            return result;
+        };
+    }
+
+    window.addEventListener('load', () => {
+        const input = document.getElementById('apiUrlInput');
+        if (input && !input.value && !String(window.API_BASE_URL || '').includes(PRODUCTION_PLACEHOLDER)) {
+            input.value = window.API_BASE_URL;
+        }
+    });
+})();
+</script>
+
+<script>
+window.addEventListener('error', function(e){if(String(e.message||'').includes('getContext')){e.preventDefault();console.warn('Legacy canvas error ignored');}});
+</script>
+<script>
+function normalizeMarketForChart(market) {
+    if (!market) return null;
+    const candles = market.candleData || market.candles || market.candlestickData || market.chartData || market.ohlcv || [];
+    const normalized = candles.map((c, i) => {
+        let time = c.time;
+        if (typeof time === 'string' && !/^\d+$/.test(time)) {
+            const parsed = Date.parse(c.timestamp || time);
+            time = Number.isFinite(parsed) ? Math.floor(parsed / 1000) : i;
+        }
+        return {
+            time: Number(time),
+            timestamp: c.timestamp,
+            open: Number(c.open),
+            high: Number(c.high),
+            low: Number(c.low),
+            close: Number(c.close),
+            volume: Number(c.volume || 0)
+        };
+    }).filter(c => Number.isFinite(c.time) && Number.isFinite(c.open) &&
+                    Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close));
+
+    return {
+        ...market,
+        candleData: normalized,
+        candles: normalized,
+        chartOverlays: market.chartOverlays || {
+            cpr: [
+                {name:'BC', value: market.cpr?.bc},
+                {name:'PIVOT', value: market.cpr?.pivot},
+                {name:'TC', value: market.cpr?.tc}
+            ].filter(x => Number.isFinite(Number(x.value))),
+            support: market.support || [],
+            resistance: market.resistance || [],
+            structureMarkers: market.marketStructure?.structure || []
+        }
+    };
+}
+</script>
+
+<style>
+.global-markets-fallback{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.global-market-card{background:#0f1b2d;border:1px solid rgba(148,163,184,.18);border-radius:12px;padding:12px}
+.gm-name{font-weight:700;font-size:13px}.gm-value{font-size:18px;margin-top:6px}.gm-change{font-size:12px;margin-top:4px}.gm-up{color:#22c55e}.gm-down{color:#ef4444}.gm-flat{color:#94a3b8}.global-region-title{grid-column:1/-1;color:#94a3b8;font-size:12px;font-weight:700;text-transform:uppercase}
+</style>
+<script>
+(function(){
+const fmt=v=>{v=Number(v);return Number.isFinite(v)?v.toLocaleString('en-IN',{maximumFractionDigits:2}):'--'};
+const pc=v=>{v=Number(v);return Number.isFinite(v)?(v>0?'+':'')+v.toFixed(2)+'%':'--'};
+const esc=v=>String(v??'--').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function root(){return document.getElementById('globalMarkets')||document.getElementById('globalMarketsGrid')||document.querySelector('.global-markets-grid')||document.querySelector('[data-global-markets]')}
+function render(data){
+ const r=root(),g=data?.globalMarkets||data?.global_markets||data?.global;if(!r)return;
+ const rows=[];if(Array.isArray(g))g.forEach(x=>rows.push({region:x.region||'Global',...x}));
+ else if(g&&typeof g==='object')Object.entries(g).forEach(([region,list])=>{if(Array.isArray(list))list.forEach(x=>rows.push({region,...x}))});
+ r.classList.add('global-markets-fallback');
+ if(!rows.length){r.innerHTML='<div class="global-market-card"><b>Global Markets</b><div class="gm-flat">No data returned by backend</div></div>';return}
+ let h='',last='';rows.forEach(x=>{if(x.region!==last){last=x.region;h+='<div class="global-region-title">'+esc(last)+'</div>'}let c=Number(x.change??x.changePercent??x.percentChange),cl=!Number.isFinite(c)?'gm-flat':c>0?'gm-up':c<0?'gm-down':'gm-flat';h+='<div class="global-market-card"><div class="gm-name">'+esc(x.name||x.symbol||'Market')+'</div><div class="gm-value">'+fmt(x.value??x.price??x.lastPrice??x.close)+'</div><div class="gm-change '+cl+'">'+pc(c)+'</div></div>'});r.innerHTML=h;
+ const p=data?.prediction||{},pe=document.getElementById('predictionContent')||document.getElementById('predictionCard')||document.getElementById('marketPrediction');
+ if(pe)pe.innerHTML='<strong>'+esc(p.direction||p.signal||p.prediction||'NEUTRAL')+'</strong><div>Confidence: '+esc(p.confidence??'--')+'%</div><small>'+esc(p.reason||p.summary||'Global markets + technical analysis')+'</small>';
+}
+const old=window.updateUI;window.updateUI=function(){let z=old?old.apply(this,arguments):undefined;try{render(window.marketData||arguments[0])}catch(e){console.error(e)}return z};
+const oldFetch=window.fetchMarketData;if(oldFetch)window.fetchMarketData=async function(){let z=await oldFetch.apply(this,arguments);render(window.marketData||z?.data||z);return z};
+window.addEventListener('load',()=>setTimeout(()=>render(window.marketData),700));
+window.renderGlobalMarketsReliable=render;
+})();
+</script>
 </body>
 </html>
