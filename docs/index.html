@@ -931,7 +931,29 @@
         
         // API URL - Configurable for deployment
         // Change this to your deployed backend URL (e.g., Render, Railway)
-        let API_BASE_URL = localStorage.getItem('apiBaseUrl') || 'http://localhost:5000';
+        const DEFAULT_RENDER_URL = 'https://indian-market-predictor-api.onrender.com';
+let API_BASE_URL = localStorage.getItem('apiBaseUrl') || (
+    ['localhost','127.0.0.1'].includes(window.location.hostname)
+        ? 'http://127.0.0.1:5000'
+        : DEFAULT_RENDER_URL
+);
+
+function normalizeApiBase(url) {
+    return String(url || '').trim().replace(/\/$/, '').replace(/\/api\/market-data$/, '');
+}
+
+function getApiUrl() {
+    const base = normalizeApiBase(API_BASE_URL);
+    return `${base}/api/market-data`;
+}
+
+function setConnection(connected, message) {
+    const statusIndicator = document.getElementById('statusIndicator');
+    const connectionStatus = document.getElementById('connectionStatus');
+    if (statusIndicator) statusIndicator.classList.remove('loading', 'error');
+    if (!connected && statusIndicator) statusIndicator.classList.add('error');
+    if (connectionStatus) connectionStatus.textContent = message || (connected ? 'Connected' : 'Offline');
+}
         
         function getApiUrl() {
             return `${API_BASE_URL}/api/market-data`;
@@ -951,7 +973,7 @@
         function saveApiUrl() {
             const url = document.getElementById('apiUrlInput').value.trim();
             if (url) {
-                API_BASE_URL = url.replace(/\/$/, '');
+                API_BASE_URL = normalizeApiBase(url);
                 localStorage.setItem('apiBaseUrl', API_BASE_URL);
                 document.getElementById('configBanner').classList.remove('show');
                 fetchMarketData();
@@ -1032,49 +1054,64 @@
             const loadingOverlay = document.getElementById('loadingOverlay');
             const loadingStatus = document.getElementById('loadingStatus');
             const refreshBtn = document.getElementById('refreshBtn');
-            const statusIndicator = document.getElementById('statusIndicator');
-            const connectionStatus = document.getElementById('connectionStatus');
-            
-            if (!autoRefresh) {
-                loadingOverlay.classList.add('show');
-            }
-            
-            loadingStatus.textContent = `Fetching ${currentTimeframe.toUpperCase()} data...`;
-            refreshBtn.disabled = true;
-            statusIndicator.classList.add('loading');
-            connectionStatus.textContent = 'Fetching...';
+
+            if (!autoRefresh && loadingOverlay) loadingOverlay.classList.add('show');
+            if (loadingStatus) loadingStatus.textContent = `Fetching ${currentTimeframe.toUpperCase()} data...`;
+            if (refreshBtn) refreshBtn.disabled = true;
+
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 20000);
 
             try {
-                const response = await fetch(`${getApiUrl()}?timeframe=${currentTimeframe}`);
-                
-                if (!response.ok) {
-                    throw new Error('Backend not responding');
+                const url = `${getApiUrl()}?timeframe=${encodeURIComponent(currentTimeframe)}&_=${Date.now()}`;
+                const response = await fetch(url, {
+                    method: 'GET',
+                    mode: 'cors',
+                    cache: 'no-store',
+                    headers: { 'Accept': 'application/json' },
+                    signal: controller.signal
+                });
+
+                const raw = await response.text();
+                let payload;
+                try { payload = JSON.parse(raw); }
+                catch (_) { throw new Error(`Invalid JSON from backend (HTTP ${response.status})`); }
+
+                if (!response.ok) throw new Error(payload.error || payload.message || `Backend HTTP ${response.status}`);
+
+                // Support both direct and wrapped backend payloads.
+                marketData = payload.data || payload;
+                if (!marketData.nifty && !marketData.bankNifty && !marketData.banknifty) {
+                    throw new Error('Backend response has no Nifty or Bank Nifty market data');
                 }
-                
-                marketData = await response.json();
-                
-                statusIndicator.classList.remove('loading', 'error');
-                connectionStatus.textContent = 'Connected';
-                document.getElementById('configBanner').classList.remove('show');
-                
+
+                setConnection(true, 'Connected');
+                document.getElementById('configBanner')?.classList.remove('show');
+
                 updateUI();
-                
-                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
-                    
-                if (autoRefresh) {
-                    secondsRemaining = REFRESH_SECONDS;
+
+                // Render professional chart after the existing UI is updated.
+                const market = currentChart === 'banknifty'
+                    ? (marketData.bankNifty || marketData.banknifty)
+                    : (marketData.nifty || marketData.bankNifty || marketData.banknifty);
+
+                if (typeof renderProfessionalChart === 'function' && market) {
+                    renderProfessionalChart(market, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
                 }
-                
+
+                // Fallback to original canvas chart if professional chart cannot render.
+                if (typeof updateChart === 'function') updateChart();
+
+                if (loadingStatus) loadingStatus.textContent = 'Market data updated';
             } catch (error) {
-                console.error('Error:', error);
-                statusIndicator.classList.remove('loading');
-                statusIndicator.classList.add('error');
-                connectionStatus.textContent = 'Backend Offline';
-                document.getElementById('configBanner').classList.add('show');
-                
+                console.error('Market API error:', error);
+                setConnection(false, `Offline: ${error.message}`);
+                document.getElementById('configBanner')?.classList.add('show');
+                if (loadingStatus) loadingStatus.textContent = error.message;
             } finally {
-                loadingOverlay.classList.remove('show');
-                refreshBtn.disabled = false;
+                clearTimeout(timeout);
+                if (refreshBtn) refreshBtn.disabled = false;
+                if (!autoRefresh && loadingOverlay) loadingOverlay.classList.remove('show');
             }
         }
 
@@ -1607,7 +1644,7 @@ function lineOverlay(name,value,opts={}){
 }
 function renderProfessionalChart(market,name){
   if(!market) return;
-  const candles=market.candles||market.candlestickData||market.chartData||[];
+  const candles=market.candles||market.candlestickData||market.chartData||market.ohlcv||[];
   if(!candles.length){document.getElementById('proChartStatus').textContent='No chart data';return;}
   resetTradingChart();
   const normalized=candles.map(x=>({time:Number(x.time),open:Number(x.open),high:Number(x.high),low:Number(x.low),close:Number(x.close)})).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.open));
@@ -1662,6 +1699,42 @@ function renderProfessionalChart(market,name){
     const m=marketName==='Bank Nifty'?(payload.bankNifty||payload.banknifty):(payload.nifty||payload.bankNifty);
     renderProfessionalChart(m,marketName);
   };
+})();
+</script>
+
+
+<script>
+(function () {
+    const PRODUCTION_PLACEHOLDER = 'REPLACE-WITH-YOUR-RENDER-SERVICE.onrender.com';
+
+    function activeMarket() {
+        if (!window.marketData) return null;
+        return window.currentChart === 'banknifty'
+            ? (window.marketData.bankNifty || window.marketData.banknifty)
+            : (window.marketData.nifty || window.marketData.bankNifty || window.marketData.banknifty);
+    }
+
+    // Re-render the professional chart whenever Nifty/Bank Nifty is switched.
+    const oldSwitch = window.switchChart;
+    if (typeof oldSwitch === 'function') {
+        window.switchChart = function (chart) {
+            const result = oldSwitch.apply(this, arguments);
+            setTimeout(() => {
+                const m = activeMarket();
+                if (m && typeof window.renderProfessionalChart === 'function') {
+                    window.renderProfessionalChart(m, chart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
+                }
+            }, 0);
+            return result;
+        };
+    }
+
+    window.addEventListener('load', () => {
+        const input = document.getElementById('apiUrlInput');
+        if (input && !input.value && !String(window.API_BASE_URL || '').includes(PRODUCTION_PLACEHOLDER)) {
+            input.value = window.API_BASE_URL;
+        }
+    });
 })();
 </script>
 
