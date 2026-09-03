@@ -1100,10 +1100,8 @@ function setConnection(connected, message) {
                 }
 
                 // Fallback to original canvas chart if professional chart cannot render.
-                const legacyCanvas = document.getElementById('priceChart') || document.getElementById('marketChart');
-                if (legacyCanvas && typeof updateChart === 'function') {
-                    try { updateChart(); } catch (e) { console.warn('Legacy chart skipped', e); }
-                }
+                // Legacy canvas chart is intentionally disabled; Lightweight Charts is the renderer.
+                const legacyCanvas = null;
 
                 if (loadingStatus) loadingStatus.textContent = 'Market data updated';
             } catch (error) {
@@ -1647,9 +1645,14 @@ function lineOverlay(name,value,opts={}){
   candleSeries.createPriceLine({price:Number(value),color:opts.color||'#64748b',lineWidth:opts.width||1,lineStyle:opts.style||LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:name});
 }
 function renderProfessionalChart(market,name){
+  market=normalizeMarketForChart(market);
   if(!market) return;
-  const candles=market.candles||market.candlestickData||market.chartData||market.ohlcv||[];
-  if(!candles.length){document.getElementById('proChartStatus').textContent='No chart data';return;}
+  const candles=market.candleData||market.candles||market.candlestickData||market.chartData||market.ohlcv||[];
+  if(!candles.length){
+    document.getElementById('proChartStatus').textContent='No candleData received from API';
+    console.error('Chart payload:', market);
+    return;
+}
   resetTradingChart();
   const normalized=candles.map(x=>({time:Number(x.time),open:Number(x.open),high:Number(x.high),low:Number(x.low),close:Number(x.close)})).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.open));
   candleSeries.setData(normalized);
@@ -1744,5 +1747,46 @@ function renderProfessionalChart(market,name){
 
 <script>
 window.addEventListener('error', function(e){if(String(e.message||'').includes('getContext')){e.preventDefault();console.warn('Legacy canvas error ignored');}});
-</script></body>
+</script>
+<script>
+function normalizeMarketForChart(market) {
+    if (!market) return null;
+    const candles = market.candleData || market.candles || market.candlestickData || market.chartData || market.ohlcv || [];
+    const normalized = candles.map((c, i) => {
+        let time = c.time;
+        if (typeof time === 'string' && !/^\d+$/.test(time)) {
+            const parsed = Date.parse(c.timestamp || time);
+            time = Number.isFinite(parsed) ? Math.floor(parsed / 1000) : i;
+        }
+        return {
+            time: Number(time),
+            timestamp: c.timestamp,
+            open: Number(c.open),
+            high: Number(c.high),
+            low: Number(c.low),
+            close: Number(c.close),
+            volume: Number(c.volume || 0)
+        };
+    }).filter(c => Number.isFinite(c.time) && Number.isFinite(c.open) &&
+                    Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close));
+
+    return {
+        ...market,
+        candleData: normalized,
+        candles: normalized,
+        chartOverlays: market.chartOverlays || {
+            cpr: [
+                {name:'BC', value: market.cpr?.bc},
+                {name:'PIVOT', value: market.cpr?.pivot},
+                {name:'TC', value: market.cpr?.tc}
+            ].filter(x => Number.isFinite(Number(x.value))),
+            support: market.support || [],
+            resistance: market.resistance || [],
+            structureMarkers: market.marketStructure?.structure || []
+        }
+    };
+}
+</script>
+
+</body>
 </html>
