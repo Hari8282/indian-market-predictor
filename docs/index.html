@@ -768,7 +768,7 @@
             <!-- Backend Config Banner -->
             <div class="config-banner" id="configBanner">
                 ⚠️ Backend not connected. Enter your API URL:
-                <input type="text" id="apiUrlInput" placeholder="https://indian-market-predictor-api.onrender.com" />
+                <input type="text" id="apiUrlInput" placeholder="https://your-backend.onrender.com" />
                 <button class="btn" style="width: 100%; margin-top: 8px;" onclick="saveApiUrl()">Save & Connect</button>
             </div>
 
@@ -1100,7 +1100,10 @@ function setConnection(connected, message) {
                 }
 
                 // Fallback to original canvas chart if professional chart cannot render.
-                if (typeof updateChart === 'function') updateChart();
+                const legacyCanvas = document.getElementById('priceChart') || document.getElementById('marketChart');
+                if (legacyCanvas && typeof updateChart === 'function') {
+                    try { updateChart(); } catch (e) { console.warn('Legacy chart skipped', e); }
+                }
 
                 if (loadingStatus) loadingStatus.textContent = 'Market data updated';
             } catch (error) {
@@ -1368,7 +1371,8 @@ function setConnection(connected, message) {
 
         function drawChart(market) {
             const canvas = document.getElementById('chartCanvas');
-            const ctx = canvas.getContext('2d');
+            if (!canvas) { return; }
+        const ctx = canvas.getContext('2d');
             const dpr = window.devicePixelRatio || 1;
             const size = getCanvasSize();
             
@@ -1738,5 +1742,7 @@ function renderProfessionalChart(market,name){
 })();
 </script>
 
-</body>
+<script>
+window.addEventListener('error', function(e){if(String(e.message||'').includes('getContext')){e.preventDefault();console.warn('Legacy canvas error ignored');}});
+</script></body>
 </html>
