@@ -307,86 +307,238 @@ def fetch_market_data(symbol, timeframe='15m'):
     logger.error(f"All market-data providers failed for {symbol}")
     return None
 
-def detect_market_structure(data, lookback=80, swing=3):
-    if data is None or len(data)<20:return {"trend":"neutral","structure":[],"swingHighs":[],"swingLows":[],"score":0}
-    d=data.tail(lookback); highs=[]; lows=[]
-    for i in range(swing,len(d)-swing):
-        h=float(d["High"].iloc[i]); l=float(d["Low"].iloc[i])
-        if h>=float(d["High"].iloc[i-swing:i+swing+1].max()): highs.append((i,h))
-        if l<=float(d["Low"].iloc[i-swing:i+swing+1].min()): lows.append((i,l))
-    sh=[]; sl=[]
-    for n,(i,p) in enumerate(highs):
-        t="SH" if n==0 else ("HH" if p>highs[n-1][1] else "LH")
-        sh.append({"index":i,"timestamp":d.index[i].strftime("%Y-%m-%d %H:%M"),"price":round(p,2),"type":t})
-    for n,(i,p) in enumerate(lows):
-        t="SL" if n==0 else ("HL" if p>lows[n-1][1] else "LL")
-        sl.append({"index":i,"timestamp":d.index[i].strftime("%Y-%m-%d %H:%M"),"price":round(p,2),"type":t})
-    lh=sh[-1]["type"] if sh else None; ll=sl[-1]["type"] if sl else None
-    score=(1 if lh=="HH" else -1 if lh=="LH" else 0)+(1 if ll=="HL" else -1 if ll=="LL" else 0)
-    trend="bullish" if score==2 else "bearish" if score==-2 else "neutral"
-    structure=sorted([x for x in sh+sl if x["type"] in ("HH","HL","LH","LL")],key=lambda x:x["index"])[-12:]
-    return {"trend":trend,"structure":structure,"lastHighType":lh,"lastLowType":ll,"swingHighs":sh[-8:],"swingLows":sl[-8:],"score":score}
+
+MIN_STRUCTURE_CANDLES = 20
+
+def detect_market_structure(data, lookback=100, swing=2, min_candles=MIN_STRUCTURE_CANDLES):
+    """
+    Confirm HH/HL/LH/LL using at least 20 completed candles.
+    A pivot is confirmed only after `swing` candles have formed to its right.
+    """
+    empty = {
+        "valid": False, "minimumCandles": min_candles, "candlesAnalyzed": 0,
+        "trend": "neutral", "structure": [], "swingHighs": [], "swingLows": [],
+        "lastHighType": None, "lastLowType": None, "score": 0
+    }
+    if data is None or len(data) < min_candles:
+        empty["candlesAnalyzed"] = 0 if data is None else len(data)
+        return empty
+
+    d = data.tail(max(min_candles, lookback)).copy()
+    highs, lows = [], []
+
+    for i in range(swing, len(d) - swing):
+        h = float(d["High"].iloc[i])
+        l = float(d["Low"].iloc[i])
+        hwin = d["High"].iloc[i-swing:i+swing+1]
+        lwin = d["Low"].iloc[i-swing:i+swing+1]
+
+        if h == float(hwin.max()) and h > float(d["High"].iloc[i-1]):
+            highs.append((i, h))
+        if l == float(lwin.min()) and l < float(d["Low"].iloc[i-1]):
+            lows.append((i, l))
+
+    swing_highs, swing_lows = [], []
+    for n, (i, price) in enumerate(highs):
+        if n == 0:
+            typ = "SH"
+        else:
+            typ = "HH" if price > highs[n-1][1] else "LH"
+        swing_highs.append({
+            "index": int(i),
+            "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
+            "price": round(price, 2),
+            "type": typ,
+            "confirmed": True
+        })
+
+    for n, (i, price) in enumerate(lows):
+        if n == 0:
+            typ = "SL"
+        else:
+            typ = "HL" if price > lows[n-1][1] else "LL"
+        swing_lows.append({
+            "index": int(i),
+            "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
+            "price": round(price, 2),
+            "type": typ,
+            "confirmed": True
+        })
+
+    last_high = swing_highs[-1]["type"] if swing_highs else None
+    last_low = swing_lows[-1]["type"] if swing_lows else None
+
+    if last_high == "HH" and last_low == "HL":
+        trend, score = "bullish", 2
+    elif last_high == "LH" and last_low == "LL":
+        trend, score = "bearish", -2
+    else:
+        trend, score = "neutral", 0
+
+    structure = sorted(
+        [x for x in swing_highs + swing_lows if x["type"] in ("HH", "HL", "LH", "LL")],
+        key=lambda x: x["index"]
+    )[-20:]
+
+    return {
+        "valid": True,
+        "minimumCandles": min_candles,
+        "candlesAnalyzed": len(d),
+        "trend": trend,
+        "structure": structure,
+        "swingHighs": swing_highs[-10:],
+        "swingLows": swing_lows[-10:],
+        "lastHighType": last_high,
+        "lastLowType": last_low,
+        "score": score
+    }
+
+
+def _unique_zone_levels(points, current_price, side, tolerance):
+    values = sorted([float(x["price"]) for x in points])
+    if side == "support":
+        values = [v for v in values if v < current_price]
+        values.sort(reverse=True)
+    else:
+        values = [v for v in values if v > current_price]
+
+    merged = []
+    for value in values:
+        if not any(abs(value - existing) <= tolerance for existing in merged):
+            merged.append(value)
+    return merged[:4]
+
 
 def calculate_structure_sr(data, structure):
-    price=float(data["Close"].iloc[-1])
-    supports=sorted({x["price"] for x in structure["swingLows"] if x["price"]<price},reverse=True)[:4]
-    resistances=sorted({x["price"] for x in structure["swingHighs"] if x["price"]>price})[:4]
-    return ([{"level":f"MS-S{i+1}","value":v,"type":"Market Structure","source":"HH/HL/LL/LH"} for i,v in enumerate(supports)],
-            [{"level":f"MS-R{i+1}","value":v,"type":"Market Structure","source":"HH/HL/LL/LH"} for i,v in enumerate(resistances)])
+    if data is None or len(data) == 0 or not structure.get("valid"):
+        return [], []
 
-def generate_trade_signal(data,prediction,cpr,support,resistance,structure):
-    price=float(data["Close"].iloc[-1]); score=0; reasons=[]
-    direction=prediction.get("direction","neutral"); trend=structure.get("trend","neutral")
-    if direction=="bullish":score+=2;reasons.append("Global/market prediction bullish")
-    elif direction=="bearish":score-=2;reasons.append("Global/market prediction bearish")
-    if trend=="bullish":score+=3;reasons.append("HH + HL bullish structure")
-    elif trend=="bearish":score-=3;reasons.append("LH + LL bearish structure")
-    bc,tc=float(cpr.get("bc",0)),float(cpr.get("tc",0)); lo,hi=min(bc,tc),max(bc,tc)
-    if hi>0 and price>hi:score+=2;reasons.append("Price above CPR")
-    elif hi>0 and price<lo:score-=2;reasons.append("Price below CPR")
-    bull=float(data["Close"].iloc[-1])>float(data["Open"].iloc[-1])
-    score+=1 if bull else -1;reasons.append("Bullish candle confirmation" if bull else "Bearish candle confirmation")
-    signal="BUY" if score>=5 else "SELL" if score<=-5 else "HOLD"
-    ns=max([x for x in support if x["value"]<price],key=lambda x:x["value"],default=None)
-    nr=min([x for x in resistance if x["value"]>price],key=lambda x:x["value"],default=None)
-    atr=max(price*.003,1)
-    if signal=="BUY": stop=(ns["value"]-atr*.5) if ns else price-atr*1.5; target=nr["value"] if nr else price+atr*2
-    elif signal=="SELL": stop=(nr["value"]+atr*.5) if nr else price+atr*1.5; target=ns["value"] if ns else price-atr*2
-    else: stop=target=None
-    return {"signal":signal,"strength":"strong" if abs(score)>=8 else "moderate" if abs(score)>=5 else "weak","confidence":round(min(95,50+abs(score)*6),1),"score":score,"entry":round(price,2),"stopLoss":round(stop,2) if stop else None,"target":round(target,2) if target else None,"nearestSupport":ns,"nearestResistance":nr,"marketStructure":trend,"reasons":reasons}
+    price = float(data["Close"].iloc[-1])
+    recent_range = float((data["High"].tail(20) - data["Low"].tail(20)).mean())
+    tolerance = max(recent_range * 0.35, price * 0.001)
 
-def calculate_volume_analysis(data):
-    if data is None or len(data) < 20:
-        return {'current_volume': 0, 'avg_volume': 0, 'volume_ratio': 1.0, 'volume_trend': 'neutral'}
-    try:
-        current_volume = float(data['Volume'].iloc[-1])
-        avg_volume = float(data['Volume'].tail(20).mean())
-        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
-        volume_trend = 'high' if volume_ratio > 1.5 else 'low' if volume_ratio < 0.5 else 'normal'
+    supports = _unique_zone_levels(
+        structure.get("swingLows", []), price, "support", tolerance
+    )
+    resistances = _unique_zone_levels(
+        structure.get("swingHighs", []), price, "resistance", tolerance
+    )
+
+    return (
+        [{"level": f"MS-S{i+1}", "value": round(v, 2), "type": "Market Structure",
+          "source": "HL/LL confirmed swing low"} for i, v in enumerate(supports)],
+        [{"level": f"MS-R{i+1}", "value": round(v, 2), "type": "Market Structure",
+          "source": "HH/LH confirmed swing high"} for i, v in enumerate(resistances)]
+    )
+
+
+def generate_trade_signal(data, prediction, cpr, support, resistance, structure):
+    """
+    Strict confluence strategy:
+      minimum 20 candles + confirmed HH/HL/LH/LL + prediction + CPR +
+      market-structure support/resistance + candle confirmation.
+    """
+    if data is None or len(data) < MIN_STRUCTURE_CANDLES:
         return {
-            'current_volume': int(round(current_volume, 0)),
-            'avg_volume': int(round(avg_volume, 0)),
-            'volume_ratio': float(round(volume_ratio, 2)),
-            'volume_trend': str(volume_trend)
+            "signal": "HOLD", "strength": "weak", "confidence": 0, "score": 0,
+            "entry": None, "stopLoss": None, "target": None,
+            "marketStructure": "neutral",
+            "reasons": [f"Waiting for at least {MIN_STRUCTURE_CANDLES} candles"],
+            "conditions": {}
         }
-    except Exception:
-        return {'current_volume': 0, 'avg_volume': 0, 'volume_ratio': 1.0, 'volume_trend': 'neutral'}
 
-def generate_candlestick_data(data, max_candles=100):
+    prediction = prediction or {"direction": "neutral", "confidence": 0}
+    price = float(data["Close"].iloc[-1])
+    trend = structure.get("trend", "neutral")
+    direction = prediction.get("direction", "neutral")
+    bc, tc = float(cpr.get("bc", 0)), float(cpr.get("tc", 0))
+    cpr_low, cpr_high = min(bc, tc), max(bc, tc)
+
+    bullish_candle = float(data["Close"].iloc[-1]) > float(data["Open"].iloc[-1])
+    bearish_candle = float(data["Close"].iloc[-1]) < float(data["Open"].iloc[-1])
+
+    structure_ok_buy = trend == "bullish"
+    structure_ok_sell = trend == "bearish"
+    prediction_buy = direction == "bullish"
+    prediction_sell = direction == "bearish"
+    cpr_buy = cpr_high > 0 and price > cpr_high
+    cpr_sell = cpr_high > 0 and price < cpr_low
+
+    structure_support = [x for x in support if x.get("level", "").startswith("MS-S")]
+    structure_resistance = [x for x in resistance if x.get("level", "").startswith("MS-R")]
+    nearest_support = max(structure_support, key=lambda x: x["value"], default=None)
+    nearest_resistance = min(structure_resistance, key=lambda x: x["value"], default=None)
+
+    buy_score = sum([prediction_buy * 2, structure_ok_buy * 3, cpr_buy * 2, bullish_candle * 1])
+    sell_score = sum([prediction_sell * 2, structure_ok_sell * 3, cpr_sell * 2, bearish_candle * 1])
+
+    # Require structure + prediction + CPR alignment. Candle adds confirmation.
+    if structure_ok_buy and prediction_buy and cpr_buy and buy_score >= 7:
+        signal, score = "BUY", buy_score
+    elif structure_ok_sell and prediction_sell and cpr_sell and sell_score >= 7:
+        signal, score = "SELL", -sell_score
+    else:
+        signal, score = "HOLD", 0
+
+    recent_range = float((data["High"].tail(14) - data["Low"].tail(14)).mean())
+    risk_buffer = max(recent_range * 0.6, price * 0.002)
+
+    if signal == "BUY":
+        stop = (nearest_support["value"] - risk_buffer) if nearest_support else price - risk_buffer
+        target = nearest_resistance["value"] if nearest_resistance else price + risk_buffer * 2
+    elif signal == "SELL":
+        stop = (nearest_resistance["value"] + risk_buffer) if nearest_resistance else price + risk_buffer
+        target = nearest_support["value"] if nearest_support else price - risk_buffer * 2
+    else:
+        stop = target = None
+
+    reasons = []
+    if prediction_buy or prediction_sell: reasons.append(f"Prediction: {direction}")
+    if trend != "neutral": reasons.append(f"Structure confirmed: {trend} ({structure.get('lastHighType')} + {structure.get('lastLowType')})")
+    if cpr_buy: reasons.append("Price above CPR")
+    elif cpr_sell: reasons.append("Price below CPR")
+    else: reasons.append("Price inside/near CPR")
+    if bullish_candle: reasons.append("Latest candle bullish")
+    elif bearish_candle: reasons.append("Latest candle bearish")
+
+    confidence = min(95, 50 + abs(score) * 5) if signal != "HOLD" else 35
+
+    return {
+        "signal": signal,
+        "strength": "strong" if abs(score) >= 8 else "moderate" if abs(score) >= 7 else "weak",
+        "confidence": round(confidence, 1),
+        "score": score,
+        "entry": round(price, 2),
+        "stopLoss": round(stop, 2) if stop is not None else None,
+        "target": round(target, 2) if target is not None else None,
+        "nearestSupport": nearest_support,
+        "nearestResistance": nearest_resistance,
+        "marketStructure": trend,
+        "reasons": reasons,
+        "conditions": {
+            "minimum20Candles": structure.get("valid", False),
+            "prediction": direction,
+            "structure": trend,
+            "cprPosition": "above" if cpr_buy else "below" if cpr_sell else "inside",
+            "candle": "bullish" if bullish_candle else "bearish" if bearish_candle else "doji"
+        }
+    }
+
+def generate_candlestick_data(data, max_candles=150):
+    """Chart-ready OHLCV data. Frontend can render candles, volume and overlays."""
     if data is None or len(data) == 0:
         return []
+    d = data.tail(max_candles)
     candles = []
-    recent_data = data.tail(max_candles)
-    for idx, (timestamp, row) in enumerate(recent_data.iterrows()):
+    for idx, row in d.iterrows():
         candles.append({
-            'time': int(idx),
-            'timestamp': timestamp.strftime('%Y-%m-%d %H:%M'),
-            'open': round(float(row['Open']), 2),
-            'high': round(float(row['High']), 2),
-            'low': round(float(row['Low']), 2),
-            'close': round(float(row['Close']), 2),
-            'volume': int(row['Volume']) if 'Volume' in row and not pd.isna(row['Volume']) else 0,
-            'isBullish': bool(row['Close'] > row['Open'])
+            "time": int(idx.timestamp()) if hasattr(idx, "timestamp") else str(idx),
+            "timestamp": idx.strftime("%Y-%m-%d %H:%M"),
+            "open": round(float(row["Open"]), 2),
+            "high": round(float(row["High"]), 2),
+            "low": round(float(row["Low"]), 2),
+            "close": round(float(row["Close"]), 2),
+            "volume": int(float(row.get("Volume", 0)))
         })
     return candles
 
@@ -554,6 +706,16 @@ def process_market_data(symbol, timeframe='15m', prediction=None, data=None):
         if prediction is None:
             prediction = {'direction': 'neutral', 'confidence': 50.0}
         trade_signal = generate_trade_signal(data, prediction, cpr, support, resistance, market_structure)
+        chart_overlays = {
+            'cpr': [
+                {'name': 'BC', 'value': cpr.get('bc')},
+                {'name': 'PIVOT', 'value': cpr.get('pivot')},
+                {'name': 'TC', 'value': cpr.get('tc')}
+            ],
+            'support': support,
+            'resistance': resistance,
+            'structureMarkers': market_structure.get('structure', [])
+        }
         
         return {
             'current': float(round(current_price, 2)),
@@ -568,6 +730,7 @@ def process_market_data(symbol, timeframe='15m', prediction=None, data=None):
             'sr_info': sr_info,
             'marketStructure': market_structure,
             'tradeSignal': trade_signal,
+            'chartOverlays': chart_overlays,
             'cpr_basis': str(TIMEFRAMES.get(timeframe, {}).get('cpr_basis', 'daily')),
             'candleData': candles,
             'volume': volume,
