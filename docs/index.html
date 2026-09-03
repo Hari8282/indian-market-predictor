@@ -736,13 +736,14 @@
         @media (max-width:600px){ .strategy-card{padding:13px}.strategy-grid{grid-template-columns:1fr 1fr}.strategy-value:last-child{grid-column:span 2}.strategy-badge{font-size:19px;padding:7px 12px} }
 
     </style>
-<script src="https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.js"></script>
+
 <style>
 #proChartPanel{background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.18);padding:12px;border-radius:14px}
 #tradingChart{background:#0f172a}
 .chart-badge{padding:4px 8px;border-radius:999px;background:rgba(148,163,184,.12)}
 @media(max-width:640px){#tradingChart{height:430px!important}#proChartPanel{padding:8px}}
 </style>
+<script src="https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
     <div class="loading-overlay" id="loadingOverlay">
@@ -907,7 +908,7 @@
     <strong id="proChartTitle">Nifty 50 • Market Structure</strong>
     <span id="proChartStatus">Loading…</span>
   </div>
-  <div id="tradingChart" style="width:100%;height:520px;border-radius:12px;overflow:hidden;"></div>
+  <div id="tradingChart" style="width:100%;min-height:520px;" style="width:100%;height:520px;border-radius:12px;overflow:hidden;"></div>
   <div id="chartLegend" style="display:flex;flex-wrap:wrap;gap:10px;font-size:12px;margin-top:8px;"></div>
 </div>
 
@@ -1028,51 +1029,7 @@ function normalizeMarketForChart(market) {
 <script>
 let tvChart = null, candleSeries = null, volumeSeries = null;
 
-function chartSeries(chart, seriesType, options) {
-  if (typeof chart.addSeries === 'function' && window.LightweightCharts?.[seriesType]) {
-    return chart.addSeries(window.LightweightCharts[seriesType], options);
-  }
-  throw new Error('Lightweight Charts v5 API not available');
-}
 
-function resetTradingChart() {
-  const el = document.getElementById('tradingChart');
-  if (!el) throw new Error('Chart container #tradingChart not found');
-  if (!window.LightweightCharts) throw new Error('Lightweight Charts library failed to load');
-
-  el.innerHTML = '';
-  tvChart = LightweightCharts.createChart(el, {
-    width: Math.max(300, el.clientWidth),
-    height: Math.max(360, el.clientHeight || 520),
-    layout: { background: { type: 'solid', color: '#0f172a' }, textColor: '#cbd5e1' },
-    grid: { vertLines: { color: 'rgba(148,163,184,.08)' }, horzLines: { color: 'rgba(148,163,184,.08)' } },
-    rightPriceScale: { borderColor: 'rgba(148,163,184,.2)' },
-    timeScale: { borderColor: 'rgba(148,163,184,.2)', timeVisible: true }
-  });
-
-  candleSeries = chartSeries(tvChart, 'CandlestickSeries', {
-    upColor:'#22c55e', downColor:'#ef4444',
-    borderVisible:false, wickUpColor:'#22c55e', wickDownColor:'#ef4444'
-  });
-  volumeSeries = chartSeries(tvChart, 'HistogramSeries', {
-    priceFormat:{type:'volume'}, priceScaleId:'volume'
-  });
-  volumeSeries.priceScale().applyOptions({scaleMargins:{top:.8,bottom:0}});
-  return tvChart;
-}
-
-function normalizeChartMarket(market) {
-  const raw = market?.candleData || market?.candles || market?.chartData || market?.ohlcv || [];
-  const candles = raw.map((c,i) => {
-    let t = c.time;
-    if (!Number.isFinite(Number(t))) {
-      const d = Date.parse(c.timestamp || t);
-      t = Number.isFinite(d) ? Math.floor(d/1000) : i + 1;
-    }
-    return {time:Number(t), open:+c.open, high:+c.high, low:+c.low, close:+c.close, volume:+(c.volume||0)};
-  }).filter(c => Number.isFinite(c.time) && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close));
-  return {...market, candles};
-}
 
 function priceLine(title, price, color) {
   if (price == null || !Number.isFinite(Number(price))) return;
@@ -1083,61 +1040,195 @@ function priceLine(title, price, color) {
   });
 }
 
-function renderProfessionalChart(market, name) {
-  const m = normalizeChartMarket(market);
-  const status = document.getElementById('proChartStatus');
-  if (!m.candles.length) {
-    if (status) status.textContent = 'No candle data received';
-    return;
-  }
 
-  resetTradingChart();
-  candleSeries.setData(m.candles);
-  volumeSeries.setData(m.candles.map(c => ({
-    time:c.time, value:c.volume,
-    color:c.close >= c.open ? 'rgba(34,197,94,.35)' : 'rgba(239,68,68,.35)'
-  })));
+</script>
 
-  const o = m.chartOverlays || {};
-  const cpr = o.cpr || [
-    {name:'BC',value:m.cpr?.bc},{name:'PIVOT',value:m.cpr?.pivot},{name:'TC',value:m.cpr?.tc}
-  ];
-  cpr.forEach(x => priceLine(x.name, x.value, '#38bdf8'));
-  (o.support || m.support || []).forEach(x => priceLine(x.level || 'Support', x.value, '#22c55e'));
-  (o.resistance || m.resistance || []).forEach(x => priceLine(x.level || 'Resistance', x.value, '#ef4444'));
 
-  const sig = m.tradeSignal || {};
-  if (sig.signal && sig.signal !== 'HOLD') {
-    priceLine(sig.signal + ' ENTRY', sig.entry, sig.signal === 'BUY' ? '#22c55e' : '#ef4444');
-    priceLine('STOP LOSS', sig.stopLoss, '#f59e0b');
-    priceLine('TARGET', sig.target, '#a78bfa');
-  }
+<script>
+/* ===== Stable Lightweight Charts v5 renderer ===== */
+let tvChart = null;
+let candleSeries = null;
+let volumeSeries = null;
+let chartResizeObserver = null;
 
-  const structure = o.structureMarkers || m.marketStructure?.structure || [];
-  const candleTimes = new Set(m.candles.map(c=>c.time));
-  const markers = structure.map(x => {
-    let t = Number(x.time);
-    if (!candleTimes.has(t)) {
-      const d=Date.parse(x.timestamp||'');
-      t=Number.isFinite(d)?Math.floor(d/1000):NaN;
+function toChartTime(value, fallback) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return Math.floor(value > 100000000000 ? value / 1000 : value);
     }
-    return {
-      time:t,
-      position:(x.type==='HH'||x.type==='LH')?'aboveBar':'belowBar',
-      color:(x.type==='HH'||x.type==='HL')?'#22c55e':'#ef4444',
-      shape:(x.type==='HH'||x.type==='HL')?'arrowUp':'arrowDown',
-      text:x.type
-    };
-  }).filter(x=>candleTimes.has(x.time));
+    if (typeof value === 'string') {
+        if (/^\d+(\.\d+)?$/.test(value.trim())) {
+            const n = Number(value);
+            if (Number.isFinite(n)) return Math.floor(n > 100000000000 ? n / 1000 : n);
+        }
+        const ms = Date.parse(value);
+        if (Number.isFinite(ms)) return Math.floor(ms / 1000);
+    }
+    return fallback ?? null;
+}
 
-  if (markers.length && typeof LightweightCharts.createSeriesMarkers === 'function') {
-    LightweightCharts.createSeriesMarkers(candleSeries, markers);
-  }
+function normalizeCandles(market) {
+    const raw = market?.candleData || market?.candles || market?.candlestickData ||
+                market?.chartData || market?.ohlcv || [];
+    if (!Array.isArray(raw)) return [];
 
-  tvChart.timeScale().fitContent();
-  const title=document.getElementById('proChartTitle');
-  if(title) title.textContent=(name||'Market')+' • Trading Chart';
-  if(status) status.textContent='Connected • '+m.candles.length+' candles';
+    const out = raw.map((x, i) => {
+        if (Array.isArray(x)) {
+            return {
+                time: toChartTime(x[0], i + 1),
+                open: Number(x[1]), high: Number(x[2]),
+                low: Number(x[3]), close: Number(x[4]),
+                volume: Number(x[5] || 0)
+            };
+        }
+        return {
+            time: toChartTime(x.time ?? x.timestamp ?? x.datetime ?? x.date, i + 1),
+            open: Number(x.open ?? x.Open),
+            high: Number(x.high ?? x.High),
+            low: Number(x.low ?? x.Low),
+            close: Number(x.close ?? x.Close),
+            volume: Number(x.volume ?? x.Volume ?? 0)
+        };
+    }).filter(c =>
+        Number.isFinite(c.time) && Number.isFinite(c.open) &&
+        Number.isFinite(c.high) && Number.isFinite(c.low) &&
+        Number.isFinite(c.close)
+    ).sort((a,b) => a.time - b.time);
+
+    // Lightweight Charts rejects duplicate timestamps.
+    return out.filter((c, i, a) => i === 0 || c.time !== a[i - 1].time);
+}
+
+function resetTradingChart() {
+    const el = document.getElementById('tradingChart');
+    if (!el) throw new Error('Chart container #tradingChart not found');
+    if (!window.LightweightCharts) throw new Error('Lightweight Charts library not loaded');
+
+    if (chartResizeObserver) {
+        chartResizeObserver.disconnect();
+        chartResizeObserver = null;
+    }
+    if (tvChart && typeof tvChart.remove === 'function') tvChart.remove();
+
+    el.innerHTML = '';
+    const width = Math.max(320, Math.floor(el.clientWidth || el.parentElement?.clientWidth || 600));
+    const height = Math.max(400, Math.floor(el.clientHeight || 520));
+
+    tvChart = LightweightCharts.createChart(el, {
+        width, height,
+        layout: { background: { type: 'solid', color: '#0f172a' }, textColor: '#cbd5e1' },
+        grid: { vertLines: { color: 'rgba(148,163,184,.08)' }, horzLines: { color: 'rgba(148,163,184,.08)' } },
+        rightPriceScale: { borderColor: 'rgba(148,163,184,.2)' },
+        timeScale: { borderColor: 'rgba(148,163,184,.2)', timeVisible: true, secondsVisible: false },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal }
+    });
+
+    candleSeries = tvChart.addSeries(LightweightCharts.CandlestickSeries, {
+        upColor: '#22c55e', downColor: '#ef4444',
+        borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444'
+    });
+
+    volumeSeries = tvChart.addSeries(LightweightCharts.HistogramSeries, {
+        priceFormat: { type: 'volume' },
+        priceScaleId: 'volume'
+    });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.80, bottom: 0 } });
+
+    chartResizeObserver = new ResizeObserver(() => {
+        if (tvChart && el.clientWidth > 0) {
+            tvChart.applyOptions({ width: el.clientWidth, height: Math.max(400, el.clientHeight || 520) });
+        }
+    });
+    chartResizeObserver.observe(el);
+}
+
+function lineOverlay(name, value, opts = {}) {
+    const n = Number(value);
+    if (!candleSeries || !Number.isFinite(n)) return;
+    candleSeries.createPriceLine({
+        price: n,
+        color: opts.color || '#64748b',
+        lineWidth: opts.width || 1,
+        lineStyle: opts.style ?? LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: String(name || '')
+    });
+}
+
+function renderProfessionalChart(market, name) {
+    const candles = normalizeCandles(market);
+    const status = document.getElementById('proChartStatus');
+
+    console.log('Market chart payload:', market);
+    console.log('Valid candles:', candles.length);
+
+    if (!candles.length) {
+        if (status) status.textContent = 'No valid candle data received';
+        return false;
+    }
+
+    resetTradingChart();
+    candleSeries.setData(candles.map(c => ({
+        time: c.time, open: c.open, high: c.high, low: c.low, close: c.close
+    })));
+
+    volumeSeries.setData(candles.map(c => ({
+        time: c.time, value: c.volume,
+        color: c.close >= c.open ? 'rgba(34,197,94,.35)' : 'rgba(239,68,68,.35)'
+    })));
+
+    const overlays = market?.chartOverlays || {};
+    const cpr = Array.isArray(overlays.cpr) && overlays.cpr.length ? overlays.cpr : [
+        { name: 'BC', value: market?.cpr?.bc },
+        { name: 'PIVOT', value: market?.cpr?.pivot },
+        { name: 'TC', value: market?.cpr?.tc }
+    ];
+    cpr.forEach(x => lineOverlay(x.name || x.level || 'CPR', x.value ?? x.price, {
+        color: '#38bdf8', width: 2, style: LightweightCharts.LineStyle.Solid
+    }));
+
+    (overlays.support || market?.support || []).forEach((x, i) => {
+        const value = typeof x === 'object' ? (x.value ?? x.price ?? x.level) : x;
+        lineOverlay('S' + (i + 1), value, { color: '#22c55e' });
+    });
+    (overlays.resistance || market?.resistance || []).forEach((x, i) => {
+        const value = typeof x === 'object' ? (x.value ?? x.price ?? x.level) : x;
+        lineOverlay('R' + (i + 1), value, { color: '#ef4444' });
+    });
+
+    const signal = market?.tradeSignal || {};
+    const signalName = signal.signal || signal.action || 'HOLD';
+    if (signalName !== 'HOLD') {
+        lineOverlay(signalName + ' ENTRY', signal.entry ?? signal.entryPrice, {
+            color: signalName === 'BUY' ? '#22c55e' : '#ef4444',
+            width: 2, style: LightweightCharts.LineStyle.Solid
+        });
+        lineOverlay('STOP LOSS', signal.stopLoss ?? signal.stop_loss, { color: '#f59e0b' });
+        lineOverlay('TARGET', signal.target ?? signal.targetPrice, { color: '#a78bfa' });
+    }
+
+    const structure = overlays.structureMarkers || market?.marketStructure?.structure || [];
+    const validTimes = new Set(candles.map(c => c.time));
+    const markers = structure.map(x => {
+        const type = x.type || x.label || '';
+        const time = toChartTime(x.time ?? x.timestamp ?? x.datetime ?? x.date);
+        return {
+            time, type,
+            position: (type === 'HH' || type === 'LH') ? 'aboveBar' : 'belowBar',
+            color: (type === 'HH' || type === 'HL') ? '#22c55e' : '#ef4444',
+            shape: (type === 'HH' || type === 'HL') ? 'arrowUp' : 'arrowDown',
+            text: type
+        };
+    }).filter(x => validTimes.has(x.time));
+
+    if (markers.length && typeof LightweightCharts.createSeriesMarkers === 'function') {
+        LightweightCharts.createSeriesMarkers(candleSeries, markers);
+    }
+
+    tvChart.timeScale().fitContent();
+    const title = document.getElementById('proChartTitle');
+    if (title) title.textContent = (name || 'Market') + ' • Trading Chart';
+    if (status) status.textContent = 'Connected • ' + candles.length + ' candles';
+    return true;
 }
 </script>
 
