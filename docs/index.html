@@ -736,7 +736,7 @@
         @media (max-width:600px){ .strategy-card{padding:13px}.strategy-grid{grid-template-columns:1fr 1fr}.strategy-value:last-child{grid-column:span 2}.strategy-badge{font-size:19px;padding:7px 12px} }
 
     </style>
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 #proChartPanel{background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.18);padding:12px;border-radius:14px}
 #tradingChart{background:#0f172a}
@@ -1096,7 +1096,14 @@ function setConnection(connected, message) {
                     : (marketData.nifty || marketData.bankNifty || marketData.banknifty);
 
                 if (typeof renderProfessionalChart === 'function' && market) {
-                    renderProfessionalChart(market, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
+                    try {
+                        renderProfessionalChart(market, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
+                    } catch (chartError) {
+                        console.error('Chart rendering failed:', chartError);
+                        const chartStatus = document.getElementById('proChartStatus');
+                        if (chartStatus) chartStatus.textContent = 'Chart error: ' + chartError.message;
+                        // API is still connected; do not rethrow into the offline handler.
+                    }
                 }
 
                 // Fallback to original canvas chart if professional chart cannot render.
@@ -1622,6 +1629,35 @@ function setConnection(connected, message) {
 <script>
 let tvChart=null, candleSeries=null, volumeSeries=null;
 
+
+<script>
+function addChartSeriesCompat(chart, type, options) {
+  // Lightweight Charts v5 uses addSeries; v4 uses addCandlestickSeries/addHistogramSeries.
+  if (type === 'candlestick') {
+    if (typeof chart.addCandlestickSeries === 'function') return chart.addCandlestickSeries(options);
+    if (typeof chart.addSeries === 'function' && window.LightweightCharts && LightweightCharts.CandlestickSeries)
+      return chart.addSeries(LightweightCharts.CandlestickSeries, options);
+  }
+  if (type === 'histogram') {
+    if (typeof chart.addHistogramSeries === 'function') return chart.addHistogramSeries(options);
+    if (typeof chart.addSeries === 'function' && window.LightweightCharts && LightweightCharts.HistogramSeries)
+      return chart.addSeries(LightweightCharts.HistogramSeries, options);
+  }
+  throw new Error('Unsupported Lightweight Charts API. Check the loaded library version.');
+}
+
+function addStructureMarkersCompat(series, markers) {
+  if (!markers || !markers.length) return;
+  if (typeof series.setMarkers === 'function') {
+    series.setMarkers(markers);
+    return;
+  }
+  // v5 supports createSeriesMarkers as a library helper.
+  if (window.LightweightCharts && typeof LightweightCharts.createSeriesMarkers === 'function') {
+    LightweightCharts.createSeriesMarkers(series, markers);
+  }
+}
+</script>
 function resetTradingChart(){
   const el=document.getElementById('tradingChart');
   if(!el || !window.LightweightCharts) return null;
@@ -1634,8 +1670,8 @@ function resetTradingChart(){
     timeScale:{borderColor:'rgba(148,163,184,.2)',timeVisible:true,secondsVisible:false},
     crosshair:{mode:LightweightCharts.CrosshairMode.Normal}
   });
-  candleSeries=tvChart.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderVisible:false,wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
-  volumeSeries=tvChart.addHistogramSeries({priceFormat:{type:'volume'},priceScaleId:'volume'});
+  candleSeries=addChartSeriesCompat(tvChart,'candlestick',{upColor:'#22c55e',downColor:'#ef4444',borderVisible:false,wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
+  volumeSeries=addChartSeriesCompat(tvChart,'histogram',{priceFormat:{type:'volume'},priceScaleId:'volume'});
   volumeSeries.priceScale().applyOptions({scaleMargins:{top:.8,bottom:0}});
   new ResizeObserver(()=>tvChart&&tvChart.applyOptions({width:el.clientWidth,height:el.clientHeight})).observe(el);
   return tvChart;
@@ -1668,7 +1704,7 @@ function renderProfessionalChart(market,name){
     shape:(x.type==='HH'||x.type==='HL')?'arrowUp':'arrowDown',
     text:x.type
   })).filter(x=>Number.isFinite(x.time));
-  if(candleSeries.setMarkers) candleSeries.setMarkers(markers);
+  addStructureMarkersCompat(candleSeries,markers);
   const sig=market.tradeSignal||{};
   if(sig.entry && sig.signal && sig.signal!=='HOLD'){
     lineOverlay(sig.signal+' ENTRY',sig.entry,{color:sig.signal==='BUY'?'#22c55e':'#ef4444',width:2,style:LightweightCharts.LineStyle.Solid});
