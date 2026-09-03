@@ -736,6 +736,13 @@
         @media (max-width:600px){ .strategy-card{padding:13px}.strategy-grid{grid-template-columns:1fr 1fr}.strategy-value:last-child{grid-column:span 2}.strategy-badge{font-size:19px;padding:7px 12px} }
 
     </style>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+#proChartPanel{background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.18);padding:12px;border-radius:14px}
+#tradingChart{background:#0f172a}
+.chart-badge{padding:4px 8px;border-radius:999px;background:rgba(148,163,184,.12)}
+@media(max-width:640px){#tradingChart{height:430px!important}#proChartPanel{padding:8px}}
+</style>
 </head>
 <body>
     <div class="loading-overlay" id="loadingOverlay">
@@ -894,7 +901,16 @@
                 </div>
 
                 <div class="chart-wrapper">
-                    <canvas id="chartCanvas"></canvas>
+                    
+<div id="proChartPanel" style="margin:16px 0;">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
+    <strong id="proChartTitle">Nifty 50 • Market Structure</strong>
+    <span id="proChartStatus">Loading…</span>
+  </div>
+  <div id="tradingChart" style="width:100%;height:520px;border-radius:12px;overflow:hidden;"></div>
+  <div id="chartLegend" style="display:flex;flex-wrap:wrap;gap:10px;font-size:12px;margin-top:8px;"></div>
+</div>
+
                 </div>
             </div>
         </div>
@@ -1563,5 +1579,91 @@
             stopAutoRefresh();
         });
     </script>
+
+<script>
+let tvChart=null, candleSeries=null, volumeSeries=null;
+
+function resetTradingChart(){
+  const el=document.getElementById('tradingChart');
+  if(!el || !window.LightweightCharts) return null;
+  el.innerHTML='';
+  tvChart=LightweightCharts.createChart(el,{
+    width:el.clientWidth,height:el.clientHeight,
+    layout:{background:{type:'solid',color:'#0f172a'},textColor:'#cbd5e1'},
+    grid:{vertLines:{color:'rgba(148,163,184,.08)'},horzLines:{color:'rgba(148,163,184,.08)'}},
+    rightPriceScale:{borderColor:'rgba(148,163,184,.2)'},
+    timeScale:{borderColor:'rgba(148,163,184,.2)',timeVisible:true,secondsVisible:false},
+    crosshair:{mode:LightweightCharts.CrosshairMode.Normal}
+  });
+  candleSeries=tvChart.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderVisible:false,wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
+  volumeSeries=tvChart.addHistogramSeries({priceFormat:{type:'volume'},priceScaleId:'volume'});
+  volumeSeries.priceScale().applyOptions({scaleMargins:{top:.8,bottom:0}});
+  new ResizeObserver(()=>tvChart&&tvChart.applyOptions({width:el.clientWidth,height:el.clientHeight})).observe(el);
+  return tvChart;
+}
+function lineOverlay(name,value,opts={}){
+  if(!candleSeries || value===undefined || value===null || Number.isNaN(Number(value))) return;
+  candleSeries.createPriceLine({price:Number(value),color:opts.color||'#64748b',lineWidth:opts.width||1,lineStyle:opts.style||LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:name});
+}
+function renderProfessionalChart(market,name){
+  if(!market) return;
+  const candles=market.candles||market.candlestickData||market.chartData||[];
+  if(!candles.length){document.getElementById('proChartStatus').textContent='No chart data';return;}
+  resetTradingChart();
+  const normalized=candles.map(x=>({time:Number(x.time),open:Number(x.open),high:Number(x.high),low:Number(x.low),close:Number(x.close)})).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.open));
+  candleSeries.setData(normalized);
+  volumeSeries.setData(candles.map(x=>({time:Number(x.time),value:Number(x.volume||0),color:Number(x.close)>=Number(x.open)?'rgba(34,197,94,.35)':'rgba(239,68,68,.35)'})).filter(x=>Number.isFinite(x.time)));
+  const o=market.chartOverlays||{};
+  (o.cpr||[]).forEach(x=>lineOverlay(x.name,x.value,{color:'#38bdf8',style:LightweightCharts.LineStyle.Solid}));
+  (o.support||[]).forEach(x=>lineOverlay(x.level,x.value,{color:'#22c55e'}));
+  (o.resistance||[]).forEach(x=>lineOverlay(x.level,x.value,{color:'#ef4444'}));
+  const markers=(o.structureMarkers||[]).map(x=>({
+    time:Number(x.time)||Math.floor(new Date(x.timestamp).getTime()/1000),
+    position:(x.type==='HH'||x.type==='LH')?'aboveBar':'belowBar',
+    color:(x.type==='HH'||x.type==='HL')?'#22c55e':'#ef4444',
+    shape:(x.type==='HH'||x.type==='HL')?'arrowUp':'arrowDown',
+    text:x.type
+  })).filter(x=>Number.isFinite(x.time));
+  if(candleSeries.setMarkers) candleSeries.setMarkers(markers);
+  const sig=market.tradeSignal||{};
+  if(sig.entry && sig.signal && sig.signal!=='HOLD'){
+    lineOverlay(sig.signal+' ENTRY',sig.entry,{color:sig.signal==='BUY'?'#22c55e':'#ef4444',width:2,style:LightweightCharts.LineStyle.Solid});
+    lineOverlay('STOP LOSS',sig.stopLoss,{color:'#f59e0b'});
+    lineOverlay('TARGET',sig.target,{color:'#a78bfa'});
+  }
+  tvChart.timeScale().fitContent();
+  document.getElementById('proChartTitle').textContent=(name||'Market')+' • Trading Chart';
+  document.getElementById('proChartStatus').textContent=(market.marketStructure?.valid===false)?'Waiting for 20 candles':'Live structure';
+  document.getElementById('chartLegend').innerHTML='<span class="chart-badge">Candles</span><span class="chart-badge">CPR</span><span class="chart-badge">Support/Resistance</span><span class="chart-badge">HH HL LH LL</span><span class="chart-badge">'+(sig.signal||'HOLD')+'</span>';
+}
+</script>
+
+
+<script>
+(function(){
+  function currentMarketFromPayload(payload){
+    const active=(window.currentMarket||window.selectedMarket||'nifty').toLowerCase();
+    if(active.includes('bank')) return payload.bankNifty||payload.banknifty||payload.nifty;
+    return payload.nifty||payload.bankNifty||payload.banknifty;
+  }
+  const originalFetch=window.fetchMarketData;
+  if(typeof originalFetch==='function'){
+    window.fetchMarketData=async function(){
+      const result=await originalFetch.apply(this,arguments);
+      const payload=result||window.marketData||window.lastMarketData;
+      if(payload && (payload.nifty||payload.bankNifty||payload.banknifty)){
+        const m=currentMarketFromPayload(payload);
+        renderProfessionalChart(m, m===payload.nifty?'Nifty 50':'Bank Nifty');
+      }
+      return result;
+    };
+  }
+  window.renderProfessionalChartFromApi=function(payload,marketName){
+    const m=marketName==='Bank Nifty'?(payload.bankNifty||payload.banknifty):(payload.nifty||payload.bankNifty);
+    renderProfessionalChart(m,marketName);
+  };
+})();
+</script>
+
 </body>
 </html>
