@@ -682,6 +682,51 @@ def predict_market_direction(nifty_data, global_markets, indicators):
         'global_positive_ratio': float(round(global_ratio * 100, 1))
     }
 
+
+def calculate_volume_analysis(data, lookback=20):
+    """Safe volume analysis for Yahoo Finance OHLCV data."""
+    default = {
+        "current_volume": 0,
+        "avg_volume": 0,
+        "volume_ratio": 1.0,
+        "volume_trend": "neutral",
+        "volume_signal": "normal"
+    }
+    try:
+        if data is None or data.empty or "Volume" not in data.columns:
+            return default
+
+        volume = pd.to_numeric(data["Volume"], errors="coerce").fillna(0.0)
+        current_volume = float(volume.iloc[-1])
+        history = volume.iloc[max(0, len(volume)-lookback-1):-1]
+        if history.empty:
+            history = volume.iloc[:-1]
+        avg_volume = float(history.mean()) if not history.empty else current_volume
+
+        if avg_volume <= 0:
+            ratio = 1.0
+        else:
+            ratio = current_volume / avg_volume
+
+        recent = volume.tail(min(5, len(volume))).mean()
+        previous = volume.iloc[max(0, len(volume)-10):max(0, len(volume)-5)].mean()
+        if previous and previous > 0:
+            trend = "increasing" if recent > previous * 1.05 else "decreasing" if recent < previous * 0.95 else "neutral"
+        else:
+            trend = "neutral"
+
+        signal = "high" if ratio >= 1.5 else "low" if ratio <= 0.6 else "normal"
+        return {
+            "current_volume": int(round(current_volume)),
+            "avg_volume": int(round(avg_volume)),
+            "volume_ratio": round(float(ratio), 2),
+            "volume_trend": trend,
+            "volume_signal": signal
+        }
+    except Exception as e:
+        logger.warning("Volume analysis failed: %s", e)
+        return default
+
 def process_market_data(symbol, timeframe='15m', prediction=None, data=None):
     try:
         if data is None:
