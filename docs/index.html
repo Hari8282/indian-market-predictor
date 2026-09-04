@@ -1155,33 +1155,14 @@ function setConnection(connected, message) {
 
                 if (!response.ok) throw new Error(payload.error || payload.message || `Backend HTTP ${response.status}`);
 
-                // Normalize direct, wrapped, nested and degraded backend responses.
+                // Support both direct and wrapped backend payloads.
                 marketData = normalizeBackendPayload(payload);
 
-                const hasNifty = !!marketData.nifty;
-                const hasBankNifty = !!marketData.bankNifty;
-                const hasAnyMarket = hasNifty || hasBankNifty;
-
-                if (!hasAnyMarket) {
-                    // Backend may still be healthy (for example global-market data can
-                    // be available while an Indian ticker provider is temporarily down).
-                    setConnection(
-                        false,
-                        `Connected, but no Indian index dataset was returned (status: ${marketData.status || 'unknown'})`
-                    );
-                    if (loadingStatus) {
-                        loadingStatus.textContent =
-                            'Backend reachable; Nifty/Bank Nifty data temporarily unavailable';
-                    }
-                    document.getElementById('configBanner')?.classList.add('show');
-                    return;
+                if (!marketData.nifty && !marketData.bankNifty) {
+                    console.warn('Indian market objects missing; backend/global data may still be available.');
                 }
 
-                const degraded = marketData.data_provider_status === 'temporarily_unavailable' ||
-                                 (!!marketData.nifty && marketData.nifty.available === false) ||
-                                 (!!marketData.bankNifty && marketData.bankNifty.available === false);
-
-                setConnection(true, degraded ? 'Connected • Data provider degraded' : 'Connected');
+                setConnection(true, 'Connected');
                 document.getElementById('configBanner')?.classList.remove('show');
 
                 updateUI();
@@ -1191,8 +1172,14 @@ function setConnection(connected, message) {
                     ? (marketData.bankNifty || marketData.banknifty)
                     : (marketData.nifty || marketData.bankNifty || marketData.banknifty);
 
-                if (typeof renderProfessionalChart === 'function' && market) {
-                    renderProfessionalChart(market, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
+                if (typeof renderProfessionalChart === 'function' && market && (market.candleData || []).length) {
+                    try {
+                        renderProfessionalChart(market, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
+                    } catch (chartError) {
+                        console.error('Chart error:', chartError);
+                        const cs = document.getElementById('proChartStatus');
+                        if (cs) cs.textContent = 'Backend connected • chart data unavailable';
+                    }
                 }
 
                 // Fallback to original canvas chart if professional chart cannot render.
@@ -1216,25 +1203,12 @@ function setConnection(connected, message) {
         function updateUI() {
             if (!marketData) return;
             
-            try { updatePriceCards(); } catch (e) { console.warn('Price card update skipped', e); }
-            try { updatePrediction(); } catch (e) { console.warn('Prediction update skipped', e); }
-            try { updateGlobalMarkets(); } catch (e) { console.warn('Global market update skipped', e); }
-            try { updateIndicators(); } catch (e) { console.warn('Indicator update skipped', e); }
-            try { updateStrategySignal(); } catch (e) { console.warn('Strategy update skipped', e); }
-
-            const active = activeMarketForChart();
-            if (active && Array.isArray(active.candleData) && active.candleData.length) {
-                try {
-                    renderProfessionalChart(active, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
-                } catch (e) {
-                    console.warn('Chart render skipped:', e);
-                    const chartStatus = document.getElementById('proChartStatus');
-                    if (chartStatus) chartStatus.textContent = 'Chart unavailable; backend connected';
-                }
-            } else {
-                const chartStatus = document.getElementById('proChartStatus');
-                if (chartStatus) chartStatus.textContent = 'Backend connected • waiting for Indian candle data';
-            }
+            updatePriceCards();
+            updatePrediction();
+            updateGlobalMarkets();
+            updateIndicators();
+            updateStrategySignal();
+            renderProfessionalChart(activeMarketForChart(), currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
         }
 
         function updatePriceCards() {
@@ -1245,7 +1219,7 @@ function setConnection(connected, message) {
             niftyCard.className = `price-card ${nifty.change > 0 ? 'bullish' : 'bearish'}`;
             niftyCard.innerHTML = `
                 <div class="price-label">NIFTY 50</div>
-                <div class="price-value">${nifty.current == null ? '--' : '₹' + parseFloat(nifty.current).toLocaleString('en-IN', {maximumFractionDigits: 2})}</div>
+                <div class="price-value">₹${parseFloat(nifty.current).toLocaleString()}</div>
                 <div class="price-change ${nifty.change > 0 ? 'bullish-text' : 'bearish-text'}">
                     ${nifty.change > 0 ? '▲' : '▼'} ${Math.abs(nifty.change)} (${nifty.changePercent}%)
                 </div>
@@ -1255,7 +1229,7 @@ function setConnection(connected, message) {
             bankNiftyCard.className = `price-card ${bankNifty.change > 0 ? 'bullish' : 'bearish'}`;
             bankNiftyCard.innerHTML = `
                 <div class="price-label">BANK NIFTY</div>
-                <div class="price-value">${bankNifty.current == null ? '--' : '₹' + parseFloat(bankNifty.current).toLocaleString('en-IN', {maximumFractionDigits: 2})}</div>
+                <div class="price-value">₹${parseFloat(bankNifty.current).toLocaleString()}</div>
                 <div class="price-change ${bankNifty.change > 0 ? 'bullish-text' : 'bearish-text'}">
                     ${bankNifty.change > 0 ? '▲' : '▼'} ${Math.abs(bankNifty.change)} (${bankNifty.changePercent}%)
                 </div>
@@ -1263,11 +1237,12 @@ function setConnection(connected, message) {
         }
 
         function updatePrediction() {
-            const pred = marketData.prediction;
+            const pred = marketData.prediction || {direction:'neutral',confidence:0,signals:{}};
             const signals = pred.signals || {};
-            const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
+            const market = currentChart === 'nifty' ? (marketData.nifty || {}) : (marketData.bankNifty || marketData.banknifty || {});
+            const cpr = market.cpr || {};
             const cprBasis = market.cpr?.basis || 'Daily';
-            const cprPeriod = market.cpr?.period_label || 'N/A';
+            const cprPeriod = cpr.period_label || 'N/A';
             
             const dirEl = document.getElementById('predictionDirection');
             dirEl.className = `prediction-direction ${pred.direction === 'bullish' ? 'bullish-text' : pred.direction === 'bearish' ? 'bearish-text' : ''}`;
@@ -1285,9 +1260,9 @@ function setConnection(connected, message) {
                         📊 <strong>${cprBasis} CPR</strong> | ${cprPeriod}
                     </div>
                     <div style="display: flex; gap: 10px; font-size: 11px; color: #94a3b8; flex-wrap: wrap;">
-                        <span>PP: ₹${market.cpr.pivot}</span>
-                        <span>TC: ₹${market.cpr.tc}</span>
-                        <span>BC: ₹${market.cpr.bc}</span>
+                        <span>PP: ${market.cpr?.pivot == null ? '--' : '₹' + market.cpr.pivot}</span>
+                        <span>TC: ${market.cpr?.tc == null ? '--' : '₹' + market.cpr.tc}</span>
+                        <span>BC: ${market.cpr?.bc == null ? '--' : '₹' + market.cpr.bc}</span>
                     </div>
                 `;
             }
@@ -1862,6 +1837,47 @@ function normalizeCandles(market){
     return {time:toUnixTime(x.time??x.timestamp??x.datetime??x.date),open:Number(x.open??x.Open),high:Number(x.high??x.High),low:Number(x.low??x.Low),close:Number(x.close??x.Close),volume:Number(x.volume??x.Volume??0)};
   }).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.open)&&Number.isFinite(x.high)&&Number.isFinite(x.low)&&Number.isFinite(x.close)&&!seen.has(x.time)&&(seen.add(x.time),true)).sort((a,b)=>a.time-b.time);
 }
+
+function normalizeMarketForChart(market){
+  if(!market || typeof market!=='object') return null;
+
+  const raw=market.candleData||market.candles||market.candlestickData||market.chartData||market.ohlcv||[];
+  if(!Array.isArray(raw)) return {...market,candleData:[]};
+
+  const out=raw.map((x,i)=>{
+    if(Array.isArray(x)){
+      return {
+        time:toUnixTime(x[0]) ?? (i+1),
+        open:Number(x[1]), high:Number(x[2]), low:Number(x[3]),
+        close:Number(x[4]), volume:Number(x[5]||0)
+      };
+    }
+    return {
+      time:toUnixTime(x.time??x.timestamp??x.datetime??x.date) ?? (i+1),
+      open:Number(x.open??x.Open),
+      high:Number(x.high??x.High),
+      low:Number(x.low??x.Low),
+      close:Number(x.close??x.Close),
+      volume:Number(x.volume??x.Volume??0)
+    };
+  }).filter(c =>
+    Number.isFinite(c.time) &&
+    Number.isFinite(c.open) &&
+    Number.isFinite(c.high) &&
+    Number.isFinite(c.low) &&
+    Number.isFinite(c.close)
+  ).sort((a,b)=>a.time-b.time);
+
+  const seen=new Set();
+  const unique=out.filter(c=>{
+    if(seen.has(c.time)) return false;
+    seen.add(c.time);
+    return true;
+  });
+
+  return {...market,candleData:unique};
+}
+
 function renderProfessionalChart(market,name){
   market=normalizeMarketForChart(market);
   if(!market) return;
