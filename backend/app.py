@@ -308,30 +308,33 @@ def fetch_market_data(symbol, timeframe='15m'):
     return None
 
 
-MIN_STRUCTURE_CANDLES = 20
+MIN_STRUCTURE_CANDLES = 21  # 10 left + pivot + 10 right = smallest window that can confirm one swing
 
-def detect_market_structure(data, lookback=100, swing=2, min_candles=MIN_STRUCTURE_CANDLES):
+def detect_market_structure(data, lookback=100, left_bars=10, right_bars=10, min_candles=MIN_STRUCTURE_CANDLES):
     """
-    Confirm HH/HL/LH/LL using at least 20 completed candles.
-    A pivot is confirmed only after `swing` candles have formed to its right.
+    Confirm HH/HL/LH/LL swing points using a fractal window: a candle is only
+    accepted as a swing high/low if it is the highest/lowest point across
+    `left_bars` candles before it AND `right_bars` candles after it.
+    A pivot is confirmed only once `right_bars` candles have completed to its right.
     """
+    min_required = max(min_candles, left_bars + right_bars + 1)
     empty = {
-        "valid": False, "minimumCandles": min_candles, "candlesAnalyzed": 0,
+        "valid": False, "minimumCandles": min_required, "candlesAnalyzed": 0,
         "trend": "neutral", "structure": [], "swingHighs": [], "swingLows": [],
         "lastHighType": None, "lastLowType": None, "score": 0
     }
-    if data is None or len(data) < min_candles:
+    if data is None or len(data) < min_required:
         empty["candlesAnalyzed"] = 0 if data is None else len(data)
         return empty
 
-    d = data.tail(max(min_candles, lookback)).copy()
+    d = data.tail(max(min_required, lookback)).copy()
     highs, lows = [], []
 
-    for i in range(swing, len(d) - swing):
+    for i in range(left_bars, len(d) - right_bars):
         h = float(d["High"].iloc[i])
         l = float(d["Low"].iloc[i])
-        hwin = d["High"].iloc[i-swing:i+swing+1]
-        lwin = d["Low"].iloc[i-swing:i+swing+1]
+        hwin = d["High"].iloc[i-left_bars:i+right_bars+1]
+        lwin = d["Low"].iloc[i-left_bars:i+right_bars+1]
 
         if h == float(hwin.max()) and h > float(d["High"].iloc[i-1]):
             highs.append((i, h))
@@ -382,7 +385,7 @@ def detect_market_structure(data, lookback=100, swing=2, min_candles=MIN_STRUCTU
 
     return {
         "valid": True,
-        "minimumCandles": min_candles,
+        "minimumCandles": min_required,
         "candlesAnalyzed": len(d),
         "trend": trend,
         "structure": structure,
