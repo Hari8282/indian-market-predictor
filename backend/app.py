@@ -640,6 +640,41 @@ def generate_candlestick_data(data, max_candles=150):
         })
     return candles
 
+def calculate_volume_analysis(data):
+    """Compare the latest volume bar against its recent average to gauge participation."""
+    try:
+        if data is None or len(data) == 0 or 'Volume' not in data.columns:
+            return {'current_volume': 0, 'avg_volume': 0, 'volume_ratio': 0.0, 'volume_trend': 'unknown'}
+
+        volume = data['Volume'].fillna(0)
+        current_volume = float(volume.iloc[-1])
+        lookback = min(20, len(volume))
+        avg_volume = float(volume.tail(lookback).mean()) if lookback > 0 else 0.0
+        volume_ratio = float(round(current_volume / avg_volume, 2)) if avg_volume > 0 else 0.0
+
+        if avg_volume <= 0:
+            trend = 'unknown'
+        elif volume_ratio >= 1.5:
+            trend = 'surging'
+        elif volume_ratio >= 1.1:
+            trend = 'increasing'
+        elif volume_ratio <= 0.5:
+            trend = 'very low'
+        elif volume_ratio <= 0.9:
+            trend = 'decreasing'
+        else:
+            trend = 'normal'
+
+        return {
+            'current_volume': int(current_volume),
+            'avg_volume': int(round(avg_volume)),
+            'volume_ratio': volume_ratio,
+            'volume_trend': trend
+        }
+    except Exception as e:
+        logger.error(f"Error calculating volume analysis: {e}")
+        return {'current_volume': 0, 'avg_volume': 0, 'volume_ratio': 0.0, 'volume_trend': 'unknown'}
+
 def calculate_technical_indicators(data):
     if data is None or len(data) < 20:
         return {}
