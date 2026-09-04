@@ -736,7 +736,7 @@
         @media (max-width:600px){ .strategy-card{padding:13px}.strategy-grid{grid-template-columns:1fr 1fr}.strategy-value:last-child{grid-column:span 2}.strategy-badge{font-size:19px;padding:7px 12px} }
 
     </style>
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 #proChartPanel{background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.18);padding:12px;border-radius:14px}
 #tradingChart{background:#0f172a}
@@ -1057,64 +1057,74 @@ function setConnection(connected, message) {
 
         function normalizeBackendPayload(raw) {
             const root = raw && typeof raw === 'object' ? raw : {};
-            const queue = [root], seen = new Set(), objects = [];
+            const containers = [];
+            const queue = [root];
+            const seen = new Set();
 
             while (queue.length) {
                 const obj = queue.shift();
                 if (!obj || typeof obj !== 'object' || seen.has(obj)) continue;
-                seen.add(obj); objects.push(obj);
-                for (const key of ['data','result','response','payload','marketData','markets']) {
-                    if (obj[key] && typeof obj[key] === 'object') queue.push(obj[key]);
+                seen.add(obj);
+                containers.push(obj);
+
+                for (const value of Object.values(obj)) {
+                    if (value && typeof value === 'object') queue.push(value);
                 }
             }
 
             const aliases = {
-                nifty: ['nifty','nifty50','nifty_50','nseNifty','niftyData'],
-                bankNifty: ['bankNifty','banknifty','bank_nifty','niftyBank','nseBankNifty','bankNiftyData']
+                nifty: ['nifty','nifty50','nifty_50','NIFTY','NIFTY50','nseNifty','niftyData'],
+                bankNifty: ['bankNifty','banknifty','bank_nifty','NIFTYBANK','BANKNIFTY','nseBankNifty','bankNiftyData']
             };
 
-            const pick = (obj, names) => {
+            function pick(obj, names) {
                 const keys = Object.keys(obj || {});
                 for (const name of names) {
                     if (obj[name] && typeof obj[name] === 'object' && !Array.isArray(obj[name])) return obj[name];
-                    const actual = keys.find(k => k.toLowerCase() === String(name).toLowerCase());
+                    const actual = keys.find(k => k.toLowerCase() === name.toLowerCase());
                     if (actual && obj[actual] && typeof obj[actual] === 'object' && !Array.isArray(obj[actual])) return obj[actual];
                 }
                 return null;
-            };
+            }
 
-            let nifty = null, bankNifty = null;
-            for (const obj of objects) {
+            let nifty = null;
+            let bankNifty = null;
+
+            for (const obj of containers) {
                 nifty ||= pick(obj, aliases.nifty);
                 bankNifty ||= pick(obj, aliases.bankNifty);
             }
 
-            // Support arrays of named market objects.
-            for (const obj of objects) {
-                if (!Array.isArray(obj)) continue;
-                for (const item of obj) {
-                    if (!item || typeof item !== 'object') continue;
-                    const id = String(item.symbol || item.name || item.market || item.key || item.id || '').toUpperCase();
-                    if (!nifty && id.includes('NIFTY') && !id.includes('BANK')) nifty = item;
-                    if (!bankNifty && (id.includes('BANKNIFTY') || id.includes('NIFTYBANK') || (id.includes('BANK') && id.includes('NIFTY')))) bankNifty = item;
+            // Find market-like objects by symbol/name even if nested in arrays.
+            for (const obj of containers) {
+                for (const value of Object.values(obj)) {
+                    const arr = Array.isArray(value) ? value : null;
+                    if (!arr) continue;
+                    for (const item of arr) {
+                        if (!item || typeof item !== 'object') continue;
+                        const id = String(item.symbol || item.name || item.market || item.key || item.id || '').toUpperCase();
+                        if (!nifty && /(^|[^A-Z])NIFTY(50)?([^A-Z]|$)/.test(id) && !id.includes('BANK')) nifty = item;
+                        if (!bankNifty && (id.includes('BANKNIFTY') || id.includes('NIFTYBANK'))) bankNifty = item;
+                    }
                 }
             }
 
-            if (!nifty && !bankNifty) {
-                const keys = Object.keys(root).join(', ') || '(no top-level keys)';
-                throw new Error('Backend connected but Nifty/Bank Nifty data was not recognized. Response keys: ' + keys);
-            }
+            const shared = containers.find(o => o.globalMarkets || o.prediction || o.timeframe) || root;
 
-            const shared = objects.find(o => pick(o, aliases.nifty) || pick(o, aliases.bankNifty)) || root;
             return {
                 ...shared,
-                nifty: nifty || {},
-                bankNifty: bankNifty || {},
-                banknifty: bankNifty || {},
-                globalMarkets: shared.globalMarkets || root.globalMarkets || shared.global || root.global || [],
-                prediction: shared.prediction || root.prediction || shared.marketPrediction || root.marketPrediction || {}
+                nifty: nifty || null,
+                bankNifty: bankNifty || null,
+                banknifty: bankNifty || null,
+                globalMarkets: shared.globalMarkets || root.globalMarkets || {},
+                prediction: shared.prediction || root.prediction || root.marketPrediction || {},
+                status: raw.status || shared.status || 'success',
+                data_provider_status: raw.data_provider_status || shared.data_provider_status || 'unknown',
+                nifty_available: Boolean(nifty?.candleData?.length),
+                banknifty_available: Boolean(bankNifty?.candleData?.length)
             };
         }
+
 
         async function fetchMarketData() {
             const loadingOverlay = document.getElementById('loadingOverlay');
@@ -1145,10 +1155,33 @@ function setConnection(connected, message) {
 
                 if (!response.ok) throw new Error(payload.error || payload.message || `Backend HTTP ${response.status}`);
 
-                // Support both direct and wrapped backend payloads.
+                // Normalize direct, wrapped, nested and degraded backend responses.
                 marketData = normalizeBackendPayload(payload);
 
-                setConnection(true, 'Connected');
+                const hasNifty = !!marketData.nifty;
+                const hasBankNifty = !!marketData.bankNifty;
+                const hasAnyMarket = hasNifty || hasBankNifty;
+
+                if (!hasAnyMarket) {
+                    // Backend may still be healthy (for example global-market data can
+                    // be available while an Indian ticker provider is temporarily down).
+                    setConnection(
+                        false,
+                        `Connected, but no Indian index dataset was returned (status: ${marketData.status || 'unknown'})`
+                    );
+                    if (loadingStatus) {
+                        loadingStatus.textContent =
+                            'Backend reachable; Nifty/Bank Nifty data temporarily unavailable';
+                    }
+                    document.getElementById('configBanner')?.classList.add('show');
+                    return;
+                }
+
+                const degraded = marketData.data_provider_status === 'temporarily_unavailable' ||
+                                 (!!marketData.nifty && marketData.nifty.available === false) ||
+                                 (!!marketData.bankNifty && marketData.bankNifty.available === false);
+
+                setConnection(true, degraded ? 'Connected • Data provider degraded' : 'Connected');
                 document.getElementById('configBanner')?.classList.remove('show');
 
                 updateUI();
@@ -1183,12 +1216,25 @@ function setConnection(connected, message) {
         function updateUI() {
             if (!marketData) return;
             
-            updatePriceCards();
-            updatePrediction();
-            updateGlobalMarkets();
-            updateIndicators();
-            updateStrategySignal();
-            renderProfessionalChart(activeMarketForChart(), currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
+            try { updatePriceCards(); } catch (e) { console.warn('Price card update skipped', e); }
+            try { updatePrediction(); } catch (e) { console.warn('Prediction update skipped', e); }
+            try { updateGlobalMarkets(); } catch (e) { console.warn('Global market update skipped', e); }
+            try { updateIndicators(); } catch (e) { console.warn('Indicator update skipped', e); }
+            try { updateStrategySignal(); } catch (e) { console.warn('Strategy update skipped', e); }
+
+            const active = activeMarketForChart();
+            if (active && Array.isArray(active.candleData) && active.candleData.length) {
+                try {
+                    renderProfessionalChart(active, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
+                } catch (e) {
+                    console.warn('Chart render skipped:', e);
+                    const chartStatus = document.getElementById('proChartStatus');
+                    if (chartStatus) chartStatus.textContent = 'Chart unavailable; backend connected';
+                }
+            } else {
+                const chartStatus = document.getElementById('proChartStatus');
+                if (chartStatus) chartStatus.textContent = 'Backend connected • waiting for Indian candle data';
+            }
         }
 
         function updatePriceCards() {
@@ -1199,7 +1245,7 @@ function setConnection(connected, message) {
             niftyCard.className = `price-card ${nifty.change > 0 ? 'bullish' : 'bearish'}`;
             niftyCard.innerHTML = `
                 <div class="price-label">NIFTY 50</div>
-                <div class="price-value">₹${parseFloat(nifty.current).toLocaleString()}</div>
+                <div class="price-value">${nifty.current == null ? '--' : '₹' + parseFloat(nifty.current).toLocaleString('en-IN', {maximumFractionDigits: 2})}</div>
                 <div class="price-change ${nifty.change > 0 ? 'bullish-text' : 'bearish-text'}">
                     ${nifty.change > 0 ? '▲' : '▼'} ${Math.abs(nifty.change)} (${nifty.changePercent}%)
                 </div>
@@ -1209,7 +1255,7 @@ function setConnection(connected, message) {
             bankNiftyCard.className = `price-card ${bankNifty.change > 0 ? 'bullish' : 'bearish'}`;
             bankNiftyCard.innerHTML = `
                 <div class="price-label">BANK NIFTY</div>
-                <div class="price-value">₹${parseFloat(bankNifty.current).toLocaleString()}</div>
+                <div class="price-value">${bankNifty.current == null ? '--' : '₹' + parseFloat(bankNifty.current).toLocaleString('en-IN', {maximumFractionDigits: 2})}</div>
                 <div class="price-change ${bankNifty.change > 0 ? 'bullish-text' : 'bearish-text'}">
                     ${bankNifty.change > 0 ? '▲' : '▼'} ${Math.abs(bankNifty.change)} (${bankNifty.changePercent}%)
                 </div>
