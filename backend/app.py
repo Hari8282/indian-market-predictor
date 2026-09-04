@@ -309,143 +309,72 @@ def fetch_market_data(symbol, timeframe='15m'):
 
 
 MIN_STRUCTURE_CANDLES = 20
+STRUCTURE_LOOKBACK = 80
+STRUCTURE_SWING = 3
+MAX_STRUCTURE_MARKERS = 6
+MARKER_MIN_GAP_CANDLES = 4
 
-def detect_market_structure(data, lookback=100, swing=2, min_candles=MIN_STRUCTURE_CANDLES):
-    """
-    Market-structure engine.
-
-    Rules:
-    - At least 20 COMPLETED candles are mandatory.
-    - Swing points use `swing` candles on both sides, so a pivot is confirmed
-      only after the candles to its right have closed.
-    - HH/LH are classified against the previous confirmed swing high.
-    - HL/LL are classified against the previous confirmed swing low.
-    - Direction is bullish only when the latest confirmed high is HH AND the
-      latest confirmed low is HL. Bearish requires LH + LL.
-    """
-    empty = {
-        "valid": False,
-        "minimumCandles": min_candles,
-        "candlesRequired": min_candles,
-        "candlesAnalyzed": 0,
-        "completedCandles": 0,
-        "enoughCandles": False,
-        "trend": "neutral",
-        "structure": [],
-        "swingHighs": [],
-        "swingLows": [],
-        "lastHighType": None,
-        "lastLowType": None,
-        "lastHH": None,
-        "lastHL": None,
-        "lastLH": None,
-        "lastLL": None,
-        "counts": {"HH": 0, "HL": 0, "LH": 0, "LL": 0},
-        "score": 0
-    }
-
+def detect_market_structure(data, lookback=STRUCTURE_LOOKBACK, swing=STRUCTURE_SWING,
+                            min_candles=MIN_STRUCTURE_CANDLES, max_markers=MAX_STRUCTURE_MARKERS,
+                            min_gap=MARKER_MIN_GAP_CANDLES):
+    """Clean HH/HL/LH/LL structure: minimum 20 candles, confirmed pivots, sparse markers."""
+    empty = {"valid": False, "minimumCandles": min_candles, "candlesRequired": min_candles,
+             "candlesAnalyzed": 0, "completedCandles": 0, "enoughCandles": False,
+             "trend": "neutral", "structure": [], "swingHighs": [], "swingLows": [],
+             "lastHighType": None, "lastLowType": None, "lastHH": None, "lastHL": None,
+             "lastLH": None, "lastLL": None,
+             "counts": {"HH": 0, "HL": 0, "LH": 0, "LL": 0}, "score": 0}
     if data is None or len(data) < min_candles:
-        empty["candlesAnalyzed"] = 0 if data is None else len(data)
-        empty["completedCandles"] = empty["candlesAnalyzed"]
+        count = 0 if data is None else len(data)
+        empty["candlesAnalyzed"] = count; empty["completedCandles"] = count
         return empty
 
-    d = data.tail(max(min_candles, lookback)).copy()
-    d = d.dropna(subset=["Open", "High", "Low", "Close"])
-
+    d = data.tail(max(min_candles, lookback)).dropna(subset=["Open","High","Low","Close"]).copy()
     if len(d) < min_candles:
-        empty["candlesAnalyzed"] = len(d)
-        empty["completedCandles"] = len(d)
+        empty["candlesAnalyzed"] = len(d); empty["completedCandles"] = len(d)
         return empty
 
     highs, lows = [], []
-
-    # The final `swing` candles cannot yet be confirmed as pivots.
     for i in range(swing, len(d) - swing):
-        h = float(d["High"].iloc[i])
-        l = float(d["Low"].iloc[i])
-        hwin = d["High"].iloc[i-swing:i+swing+1]
-        lwin = d["Low"].iloc[i-swing:i+swing+1]
-
-        if h == float(hwin.max()) and h > float(d["High"].iloc[i-1]):
-            highs.append((i, h))
-
-        if l == float(lwin.min()) and l < float(d["Low"].iloc[i-1]):
-            lows.append((i, l))
+        h, l = float(d["High"].iloc[i]), float(d["Low"].iloc[i])
+        hwin, lwin = d["High"].iloc[i-swing:i+swing+1], d["Low"].iloc[i-swing:i+swing+1]
+        if h >= float(hwin.max()) and h > float(d["High"].iloc[i-1]):
+            if not highs or i-highs[-1][0] >= min_gap: highs.append((i,h))
+            elif h > highs[-1][1]: highs[-1] = (i,h)
+        if l <= float(lwin.min()) and l < float(d["Low"].iloc[i-1]):
+            if not lows or i-lows[-1][0] >= min_gap: lows.append((i,l))
+            elif l < lows[-1][1]: lows[-1] = (i,l)
 
     swing_highs, swing_lows = [], []
+    for pos,(i,price) in enumerate(highs):
+        typ = "SH" if pos == 0 else ("HH" if price > highs[pos-1][1] else "LH")
+        swing_highs.append({"index":int(i),"timestamp":d.index[i].strftime("%Y-%m-%d %H:%M"),
+                            "price":round(price,2),"type":typ,"confirmed":True,
+                            "candlesAgo":int(len(d)-1-i)})
+    for pos,(i,price) in enumerate(lows):
+        typ = "SL" if pos == 0 else ("HL" if price > lows[pos-1][1] else "LL")
+        swing_lows.append({"index":int(i),"timestamp":d.index[i].strftime("%Y-%m-%d %H:%M"),
+                           "price":round(price,2),"type":typ,"confirmed":True,
+                           "candlesAgo":int(len(d)-1-i)})
 
-    for n, (i, price) in enumerate(highs):
-        typ = "SH" if n == 0 else ("HH" if price > highs[n-1][1] else "LH")
-        swing_highs.append({
-            "index": int(i),
-            "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
-            "price": round(price, 2),
-            "type": typ,
-            "confirmed": True,
-            "candlesAgo": int(len(d) - 1 - i)
-        })
-
-    for n, (i, price) in enumerate(lows):
-        typ = "SL" if n == 0 else ("HL" if price > lows[n-1][1] else "LL")
-        swing_lows.append({
-            "index": int(i),
-            "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
-            "price": round(price, 2),
-            "type": typ,
-            "confirmed": True,
-            "candlesAgo": int(len(d) - 1 - i)
-        })
-
-    classified_highs = [x for x in swing_highs if x["type"] in ("HH", "LH")]
-    classified_lows = [x for x in swing_lows if x["type"] in ("HL", "LL")]
-
-    last_high = classified_highs[-1]["type"] if classified_highs else None
-    last_low = classified_lows[-1]["type"] if classified_lows else None
-
-    last_hh = next((x for x in reversed(classified_highs) if x["type"] == "HH"), None)
-    last_hl = next((x for x in reversed(classified_lows) if x["type"] == "HL"), None)
-    last_lh = next((x for x in reversed(classified_highs) if x["type"] == "LH"), None)
-    last_ll = next((x for x in reversed(classified_lows) if x["type"] == "LL"), None)
-
-    if last_high == "HH" and last_low == "HL":
-        trend, score = "bullish", 2
-    elif last_high == "LH" and last_low == "LL":
-        trend, score = "bearish", -2
-    else:
-        trend, score = "neutral", 0
-
-    structure = sorted(
-        classified_highs + classified_lows,
-        key=lambda x: x["index"]
-    )[-20:]
-
-    counts = {
-        "HH": sum(x["type"] == "HH" for x in swing_highs),
-        "HL": sum(x["type"] == "HL" for x in swing_lows),
-        "LH": sum(x["type"] == "LH" for x in swing_highs),
-        "LL": sum(x["type"] == "LL" for x in swing_lows)
-    }
-
-    return {
-        "valid": True,
-        "minimumCandles": min_candles,
-        "candlesRequired": min_candles,
-        "candlesAnalyzed": len(d),
-        "completedCandles": len(d),
-        "enoughCandles": len(d) >= min_candles,
-        "trend": trend,
-        "structure": structure,
-        "swingHighs": swing_highs[-10:],
-        "swingLows": swing_lows[-10:],
-        "lastHighType": last_high,
-        "lastLowType": last_low,
-        "lastHH": last_hh,
-        "lastHL": last_hl,
-        "lastLH": last_lh,
-        "lastLL": last_ll,
-        "counts": counts,
-        "score": score
-    }
+    ch=[x for x in swing_highs if x["type"] in ("HH","LH")]
+    cl=[x for x in swing_lows if x["type"] in ("HL","LL")]
+    last_high = ch[-1]["type"] if ch else None
+    last_low = cl[-1]["type"] if cl else None
+    trend,score = ("bullish",2) if last_high=="HH" and last_low=="HL" else (("bearish",-2) if last_high=="LH" and last_low=="LL" else ("neutral",0))
+    structure=sorted(ch+cl,key=lambda x:x["index"])[-max_markers:]
+    return {"valid":True,"minimumCandles":min_candles,"candlesRequired":min_candles,
+            "candlesAnalyzed":len(d),"completedCandles":len(d),"enoughCandles":True,
+            "trend":trend,"structure":structure,"swingHighs":swing_highs[-6:],
+            "swingLows":swing_lows[-6:],"lastHighType":last_high,"lastLowType":last_low,
+            "lastHH":next((x for x in reversed(ch) if x["type"]=="HH"),None),
+            "lastHL":next((x for x in reversed(cl) if x["type"]=="HL"),None),
+            "lastLH":next((x for x in reversed(ch) if x["type"]=="LH"),None),
+            "lastLL":next((x for x in reversed(cl) if x["type"]=="LL"),None),
+            "counts":{"HH":sum(x["type"]=="HH" for x in swing_highs),
+                      "HL":sum(x["type"]=="HL" for x in swing_lows),
+                      "LH":sum(x["type"]=="LH" for x in swing_highs),
+                      "LL":sum(x["type"]=="LL" for x in swing_lows)},"score":score}
 
 
 def _unique_zone_levels(points, current_price, side, tolerance):
@@ -497,19 +426,8 @@ def generate_trade_signal(data, prediction, cpr, support, resistance, structure)
             "signal": "HOLD", "strength": "weak", "confidence": 0, "score": 0,
             "entry": None, "stopLoss": None, "target": None,
             "marketStructure": "neutral",
-            "reasons": [
-                f"Waiting for at least {MIN_STRUCTURE_CANDLES} completed candles",
-                f"Only {0 if data is None else len(data)} candles available"
-            ],
-            "conditions": {
-                "minimum20Candles": False,
-                "candlesRequired": MIN_STRUCTURE_CANDLES,
-                "candlesAnalyzed": 0 if data is None else len(data),
-                "hh": None,
-                "hl": None,
-                "lh": None,
-                "ll": None
-            }
+            "reasons": [f"Waiting for at least {MIN_STRUCTURE_CANDLES} candles"],
+            "conditions": {}
         }
 
     prediction = prediction or {"direction": "neutral", "confidence": 0}
@@ -581,14 +499,7 @@ def generate_trade_signal(data, prediction, cpr, support, resistance, structure)
         "marketStructure": trend,
         "reasons": reasons,
         "conditions": {
-            "minimum20Candles": structure.get("enoughCandles", False),
-            "candlesRequired": structure.get("candlesRequired", MIN_STRUCTURE_CANDLES),
-            "candlesAnalyzed": structure.get("candlesAnalyzed", len(data)),
-            "hh": structure.get("lastHH"),
-            "hl": structure.get("lastHL"),
-            "lh": structure.get("lastLH"),
-            "ll": structure.get("lastLL"),
-            "structureCounts": structure.get("counts", {}),
+            "minimum20Candles": structure.get("valid", False),
             "prediction": direction,
             "structure": trend,
             "cprPosition": "above" if cpr_buy else "below" if cpr_sell else "inside",
