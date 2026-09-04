@@ -743,6 +743,10 @@
 .chart-badge{padding:4px 8px;border-radius:999px;background:rgba(148,163,184,.12)}
 @media(max-width:640px){#tradingChart{height:430px!important}#proChartPanel{padding:8px}}
 </style>
+
+<style id="strategy-signal-chart-style">
+.strategy-buy{color:#00c853;font-weight:800}.strategy-sell{color:#ff1744;font-weight:800}.strategy-hold{color:#f59e0b;font-weight:800}
+</style>
 </head>
 <body>
     <div class="loading-overlay" id="loadingOverlay">
@@ -1754,34 +1758,117 @@ function normalizeCandles(market){
   }).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.open)&&Number.isFinite(x.high)&&Number.isFinite(x.low)&&Number.isFinite(x.close)&&!seen.has(x.time)&&(seen.add(x.time),true)).sort((a,b)=>a.time-b.time);
 }
 function renderProfessionalChart(market,name){
+  market=normalizeMarketForChart(market);
+  if(!market) return;
+
+  const candles=market.candleData||market.candles||market.candlestickData||market.chartData||market.ohlcv||[];
   const status=document.getElementById('proChartStatus');
-  if(!market){if(status)status.textContent='No market selected';return;}
-  const candles=normalizeCandles(market);
-  if(!candles.length){if(status)status.textContent='No valid candleData received';console.error('Chart payload:',market);return;}
-  resetTradingChart();
-  candleSeries.setData(candles.map(x=>({time:x.time,open:x.open,high:x.high,low:x.low,close:x.close})));
-  volumeSeries.setData(candles.map(x=>({time:x.time,value:Number.isFinite(x.volume)?x.volume:0,color:x.close>=x.open?'rgba(34,197,94,.35)':'rgba(239,68,68,.35)'})));
-  const o=market.chartOverlays||{}, cpr=o.cpr||[];
-  cpr.forEach(x=>lineOverlay(x.name||'CPR',x.value??x.price,{color:'#38bdf8',style:LightweightCharts.LineStyle.Solid}));
-  (o.support||market.support||[]).forEach((x,i)=>lineOverlay(x.level||('S'+(i+1)),x.value??x.price??x.level??x,{color:'#22c55e'}));
-  (o.resistance||market.resistance||[]).forEach((x,i)=>lineOverlay(x.level||('R'+(i+1)),x.value??x.price??x.level??x,{color:'#ef4444'}));
-  const valid=new Set(candles.map(x=>x.time));
-  const markers=(o.structureMarkers||[]).map(x=>{
-    const type=x.type||x.label||'', time=toUnixTime(x.time??x.timestamp??x.datetime??x.date);
-    return {time,position:(type==='HH'||type==='LH')?'aboveBar':'belowBar',color:(type==='HH'||type==='HL')?'#22c55e':'#ef4444',shape:(type==='HH'||type==='HL')?'arrowUp':'arrowDown',text:type};
-  }).filter(x=>valid.has(x.time));
-  if(typeof LightweightCharts.createSeriesMarkers==='function') structureMarkersApi=LightweightCharts.createSeriesMarkers(candleSeries,markers);
-  const sig=market.tradeSignal||{};
-  const side=String(sig.signal||'HOLD').toUpperCase();
-  if(side!=='HOLD'){
-    lineOverlay(side+' ENTRY',sig.entry??sig.entryPrice,{color:side==='BUY'?'#22c55e':'#ef4444',width:2,style:LightweightCharts.LineStyle.Solid});
-    lineOverlay('STOP LOSS',sig.stopLoss??sig.stop_loss,{color:'#f59e0b'});
-    lineOverlay('TARGET',sig.target??sig.targetPrice,{color:'#a78bfa'});
+
+  if(!candles.length){
+    if(status) status.textContent='No candle data received from API';
+    console.error('Chart payload:',market);
+    return;
   }
+
+  resetTradingChart();
+
+  const normalized=candles.map((x,i)=>({
+    time:toUnixTime(x.time??x.timestamp??x.date??i),
+    open:Number(x.open??x.Open),
+    high:Number(x.high??x.High),
+    low:Number(x.low??x.Low),
+    close:Number(x.close??x.Close)
+  })).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.open)&&Number.isFinite(x.high)&&Number.isFinite(x.low)&&Number.isFinite(x.close))
+    .sort((a,b)=>a.time-b.time);
+
+  if(!normalized.length){
+    if(status) status.textContent='Invalid candle data';
+    return;
+  }
+
+  candleSeries.setData(normalized);
+
+  if(volumeSeries){
+    volumeSeries.setData(candles.map((x,i)=>({
+      time:toUnixTime(x.time??x.timestamp??x.date??i),
+      value:Number(x.volume??x.Volume??0),
+      color:Number(x.close??x.Close)>=Number(x.open??x.Open)?'rgba(34,197,94,.35)':'rgba(239,68,68,.35)'
+    })).filter(x=>Number.isFinite(x.time)).sort((a,b)=>a.time-b.time));
+  }
+
+  const o=market.chartOverlays||{};
+  (o.cpr||[]).forEach(x=>lineOverlay(x.name||'CPR',x.value,{color:'#38bdf8',style:LightweightCharts.LineStyle.Solid}));
+  (o.support||[]).forEach(x=>lineOverlay(x.level||x.name||'Support',x.value,{color:'#22c55e'}));
+  (o.resistance||[]).forEach(x=>lineOverlay(x.level||x.name||'Resistance',x.value,{color:'#ef4444'}));
+
+  const structureMarkers=(o.structureMarkers||market.marketStructure?.structure||[]).map(x=>({
+    time:toUnixTime(x.time??x.timestamp),
+    position:(x.type==='HH'||x.type==='LH')?'aboveBar':'belowBar',
+    color:(x.type==='HH'||x.type==='HL')?'#22c55e':'#ef4444',
+    shape:(x.type==='HH'||x.type==='HL')?'arrowUp':'arrowDown',
+    text:x.type||''
+  })).filter(x=>Number.isFinite(x.time));
+
+  const sig=market.tradeSignal||market.signal||{};
+  const signal=String(sig.signal||sig.direction||'HOLD').toUpperCase();
+
+  // Find the current/entry candle. Backend can optionally return signalTime/entryTime.
+  let signalTime=toUnixTime(sig.signalTime??sig.entryTime??sig.timestamp);
+  if(!Number.isFinite(signalTime)){
+    signalTime=normalized[normalized.length-1].time;
+  }
+
+  const signalMarkers=[...structureMarkers];
+
+  if(signal==='BUY'){
+    signalMarkers.push({
+      time:signalTime,
+      position:'belowBar',
+      color:'#00c853',
+      shape:'arrowUp',
+      text:'BUY'
+    });
+    if(Number.isFinite(Number(sig.entry))) lineOverlay('BUY ENTRY',sig.entry,{color:'#00c853',width:2,style:LightweightCharts.LineStyle.Solid});
+    if(Number.isFinite(Number(sig.stopLoss))) lineOverlay('STOP LOSS',sig.stopLoss,{color:'#f59e0b',width:2});
+    if(Number.isFinite(Number(sig.target))) lineOverlay('TARGET '+(sig.riskReward?'R:R '+sig.riskReward:''),sig.target,{color:'#a78bfa',width:2});
+  }else if(signal==='SELL'){
+    signalMarkers.push({
+      time:signalTime,
+      position:'aboveBar',
+      color:'#ff1744',
+      shape:'arrowDown',
+      text:'SELL'
+    });
+    if(Number.isFinite(Number(sig.entry))) lineOverlay('SELL ENTRY',sig.entry,{color:'#ff1744',width:2,style:LightweightCharts.LineStyle.Solid});
+    if(Number.isFinite(Number(sig.stopLoss))) lineOverlay('STOP LOSS',sig.stopLoss,{color:'#f59e0b',width:2});
+    if(Number.isFinite(Number(sig.target))) lineOverlay('TARGET '+(sig.riskReward?'R:R '+sig.riskReward:''),sig.target,{color:'#a78bfa',width:2});
+  }
+
+  addStructureMarkersCompat(candleSeries,signalMarkers);
+
+  const title=document.getElementById('proChartTitle');
+  if(title) title.textContent=(name||'Market')+' • Trading Chart';
+
+  if(status){
+    if(signal==='BUY'||signal==='SELL'){
+      status.textContent=signal+' • Entry '+(sig.entry??'--')+' • SL '+(sig.stopLoss??'--')+' • Target '+(sig.target??'--')+(sig.riskReward?' • R:R '+sig.riskReward:'');
+    }else{
+      status.textContent='HOLD • '+(sig.reason||'Waiting for global market, CPR and structure confirmation');
+    }
+  }
+
+  const legend=document.getElementById('chartLegend');
+  if(legend){
+    legend.innerHTML='Candles • CPR • Support/Resistance • HH HL LH LL • <strong>'+signal+'</strong>';
+  }
+
+  // Update any existing strategy/signal card if these IDs exist in the page.
+  const signalEl=document.getElementById('strategySignal')||document.getElementById('signalValue');
+  if(signalEl) signalEl.textContent=signal;
+  const reasonEl=document.getElementById('signalReason')||document.getElementById('strategyReason');
+  if(reasonEl) reasonEl.textContent=sig.reason||'--';
+
   tvChart.timeScale().fitContent();
-  const title=document.getElementById('proChartTitle'); if(title)title.textContent=(name||'Market')+' • Trading Chart';
-  if(status)status.textContent=market.marketStructure?.valid===false?'Waiting for 20 candles':'Live • '+candles.length+' candles';
-  const legend=document.getElementById('chartLegend'); if(legend)legend.innerHTML='<span class="chart-badge">Candles</span><span class="chart-badge">CPR</span><span class="chart-badge">Support/Resistance</span><span class="chart-badge">HH HL LH LL</span><span class="chart-badge">'+side+'</span>';
 }
 /* Make switching deterministic and avoid legacy chart redraw functions */
 const originalSwitchChart=window.switchChart;
