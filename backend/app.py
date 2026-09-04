@@ -308,73 +308,188 @@ def fetch_market_data(symbol, timeframe='15m'):
     return None
 
 
-MIN_STRUCTURE_CANDLES = 20
-STRUCTURE_LOOKBACK = 80
-STRUCTURE_SWING = 3
+MIN_STRUCTURE_CANDLES = 41
+STRUCTURE_LOOKBACK = 120
+LEFT_SWING_BARS = 20
+RIGHT_SWING_BARS = 20
 MAX_STRUCTURE_MARKERS = 6
-MARKER_MIN_GAP_CANDLES = 4
+MARKER_MIN_GAP_CANDLES = 20
 
-def detect_market_structure(data, lookback=STRUCTURE_LOOKBACK, swing=STRUCTURE_SWING,
-                            min_candles=MIN_STRUCTURE_CANDLES, max_markers=MAX_STRUCTURE_MARKERS,
-                            min_gap=MARKER_MIN_GAP_CANDLES):
-    """Clean HH/HL/LH/LL structure: minimum 20 candles, confirmed pivots, sparse markers."""
-    empty = {"valid": False, "minimumCandles": min_candles, "candlesRequired": min_candles,
-             "candlesAnalyzed": 0, "completedCandles": 0, "enoughCandles": False,
-             "trend": "neutral", "structure": [], "swingHighs": [], "swingLows": [],
-             "lastHighType": None, "lastLowType": None, "lastHH": None, "lastHL": None,
-             "lastLH": None, "lastLL": None,
-             "counts": {"HH": 0, "HL": 0, "LH": 0, "LL": 0}, "score": 0}
-    if data is None or len(data) < min_candles:
-        count = 0 if data is None else len(data)
-        empty["candlesAnalyzed"] = count; empty["completedCandles"] = count
+def detect_market_structure(
+    data,
+    lookback=STRUCTURE_LOOKBACK,
+    left_bars=LEFT_SWING_BARS,
+    right_bars=RIGHT_SWING_BARS,
+    max_markers=MAX_STRUCTURE_MARKERS,
+    min_gap=MARKER_MIN_GAP_CANDLES
+):
+    """
+    Confirm HH / HL / LH / LL using a strict 20-left / 20-right bar rule.
+
+    A swing high at bar i is confirmed only when its High is the highest
+    among the previous 20 bars and the next 20 bars.
+
+    A swing low at bar i is confirmed only when its Low is the lowest
+    among the previous 20 bars and the next 20 bars.
+
+    Because the pivot candle itself is included, at least 41 completed
+    candles are required to confirm even one structure point.
+    """
+    minimum_candles = left_bars + right_bars + 1
+    empty = {
+        "valid": False,
+        "minimumCandles": minimum_candles,
+        "candlesRequired": minimum_candles,
+        "candlesAnalyzed": 0,
+        "completedCandles": 0,
+        "enoughCandles": False,
+        "leftBars": left_bars,
+        "rightBars": right_bars,
+        "trend": "neutral",
+        "structure": [],
+        "swingHighs": [],
+        "swingLows": [],
+        "lastHighType": None,
+        "lastLowType": None,
+        "lastHH": None,
+        "lastHL": None,
+        "lastLH": None,
+        "lastLL": None,
+        "counts": {"HH": 0, "HL": 0, "LH": 0, "LL": 0},
+        "score": 0
+    }
+
+    if data is None:
         return empty
 
-    d = data.tail(max(min_candles, lookback)).dropna(subset=["Open","High","Low","Close"]).copy()
-    if len(d) < min_candles:
-        empty["candlesAnalyzed"] = len(d); empty["completedCandles"] = len(d)
+    # Only completed candles are considered.
+    d = data.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+    if len(d) < minimum_candles:
+        empty["candlesAnalyzed"] = len(d)
+        empty["completedCandles"] = len(d)
         return empty
 
-    highs, lows = [], []
-    for i in range(swing, len(d) - swing):
-        h, l = float(d["High"].iloc[i]), float(d["Low"].iloc[i])
-        hwin, lwin = d["High"].iloc[i-swing:i+swing+1], d["Low"].iloc[i-swing:i+swing+1]
-        if h >= float(hwin.max()) and h > float(d["High"].iloc[i-1]):
-            if not highs or i-highs[-1][0] >= min_gap: highs.append((i,h))
-            elif h > highs[-1][1]: highs[-1] = (i,h)
-        if l <= float(lwin.min()) and l < float(d["Low"].iloc[i-1]):
-            if not lows or i-lows[-1][0] >= min_gap: lows.append((i,l))
-            elif l < lows[-1][1]: lows[-1] = (i,l)
+    d = d.tail(max(lookback, minimum_candles)).copy()
 
-    swing_highs, swing_lows = [], []
-    for pos,(i,price) in enumerate(highs):
-        typ = "SH" if pos == 0 else ("HH" if price > highs[pos-1][1] else "LH")
-        swing_highs.append({"index":int(i),"timestamp":d.index[i].strftime("%Y-%m-%d %H:%M"),
-                            "price":round(price,2),"type":typ,"confirmed":True,
-                            "candlesAgo":int(len(d)-1-i)})
-    for pos,(i,price) in enumerate(lows):
-        typ = "SL" if pos == 0 else ("HL" if price > lows[pos-1][1] else "LL")
-        swing_lows.append({"index":int(i),"timestamp":d.index[i].strftime("%Y-%m-%d %H:%M"),
-                           "price":round(price,2),"type":typ,"confirmed":True,
-                           "candlesAgo":int(len(d)-1-i)})
+    highs = []
+    lows = []
 
-    ch=[x for x in swing_highs if x["type"] in ("HH","LH")]
-    cl=[x for x in swing_lows if x["type"] in ("HL","LL")]
-    last_high = ch[-1]["type"] if ch else None
-    last_low = cl[-1]["type"] if cl else None
-    trend,score = ("bullish",2) if last_high=="HH" and last_low=="HL" else (("bearish",-2) if last_high=="LH" and last_low=="LL" else ("neutral",0))
-    structure=sorted(ch+cl,key=lambda x:x["index"])[-max_markers:]
-    return {"valid":True,"minimumCandles":min_candles,"candlesRequired":min_candles,
-            "candlesAnalyzed":len(d),"completedCandles":len(d),"enoughCandles":True,
-            "trend":trend,"structure":structure,"swingHighs":swing_highs[-6:],
-            "swingLows":swing_lows[-6:],"lastHighType":last_high,"lastLowType":last_low,
-            "lastHH":next((x for x in reversed(ch) if x["type"]=="HH"),None),
-            "lastHL":next((x for x in reversed(cl) if x["type"]=="HL"),None),
-            "lastLH":next((x for x in reversed(ch) if x["type"]=="LH"),None),
-            "lastLL":next((x for x in reversed(cl) if x["type"]=="LL"),None),
-            "counts":{"HH":sum(x["type"]=="HH" for x in swing_highs),
-                      "HL":sum(x["type"]=="HL" for x in swing_lows),
-                      "LH":sum(x["type"]=="LH" for x in swing_highs),
-                      "LL":sum(x["type"]=="LL" for x in swing_lows)},"score":score}
+    # Last 20 candles cannot yet be confirmed because their right-side
+    # confirmation window is incomplete.
+    for i in range(left_bars, len(d) - right_bars):
+        high = float(d["High"].iloc[i])
+        low = float(d["Low"].iloc[i])
+
+        left_highs = d["High"].iloc[i-left_bars:i]
+        right_highs = d["High"].iloc[i+1:i+1+right_bars]
+
+        left_lows = d["Low"].iloc[i-left_bars:i]
+        right_lows = d["Low"].iloc[i+1:i+1+right_bars]
+
+        is_swing_high = (
+            high > float(left_highs.max()) and
+            high >= float(right_highs.max())
+        )
+
+        is_swing_low = (
+            low < float(left_lows.min()) and
+            low <= float(right_lows.min())
+        )
+
+        if is_swing_high:
+            if not highs or i - highs[-1][0] >= min_gap:
+                highs.append((i, high))
+            elif high > highs[-1][1]:
+                highs[-1] = (i, high)
+
+        if is_swing_low:
+            if not lows or i - lows[-1][0] >= min_gap:
+                lows.append((i, low))
+            elif low < lows[-1][1]:
+                lows[-1] = (i, low)
+
+    swing_highs = []
+    swing_lows = []
+
+    for pos, (i, price) in enumerate(highs):
+        swing_type = "SH" if pos == 0 else (
+            "HH" if price > highs[pos - 1][1] else "LH"
+        )
+        swing_highs.append({
+            "index": int(i),
+            "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
+            "price": round(float(price), 2),
+            "type": swing_type,
+            "confirmed": True,
+            "leftBars": left_bars,
+            "rightBars": right_bars,
+            "candlesAgo": int(len(d) - 1 - i)
+        })
+
+    for pos, (i, price) in enumerate(lows):
+        swing_type = "SL" if pos == 0 else (
+            "HL" if price > lows[pos - 1][1] else "LL"
+        )
+        swing_lows.append({
+            "index": int(i),
+            "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
+            "price": round(float(price), 2),
+            "type": swing_type,
+            "confirmed": True,
+            "leftBars": left_bars,
+            "rightBars": right_bars,
+            "candlesAgo": int(len(d) - 1 - i)
+        })
+
+    classified_highs = [
+        x for x in swing_highs if x["type"] in ("HH", "LH")
+    ]
+    classified_lows = [
+        x for x in swing_lows if x["type"] in ("HL", "LL")
+    ]
+
+    last_high = classified_highs[-1]["type"] if classified_highs else None
+    last_low = classified_lows[-1]["type"] if classified_lows else None
+
+    if last_high == "HH" and last_low == "HL":
+        trend, score = "bullish", 2
+    elif last_high == "LH" and last_low == "LL":
+        trend, score = "bearish", -2
+    else:
+        trend, score = "neutral", 0
+
+    structure = sorted(
+        classified_highs + classified_lows,
+        key=lambda x: x["index"]
+    )[-max_markers:]
+
+    return {
+        "valid": True,
+        "minimumCandles": minimum_candles,
+        "candlesRequired": minimum_candles,
+        "candlesAnalyzed": len(d),
+        "completedCandles": len(d),
+        "enoughCandles": True,
+        "leftBars": left_bars,
+        "rightBars": right_bars,
+        "trend": trend,
+        "structure": structure,
+        "swingHighs": swing_highs[-6:],
+        "swingLows": swing_lows[-6:],
+        "lastHighType": last_high,
+        "lastLowType": last_low,
+        "lastHH": next((x for x in reversed(classified_highs) if x["type"] == "HH"), None),
+        "lastHL": next((x for x in reversed(classified_lows) if x["type"] == "HL"), None),
+        "lastLH": next((x for x in reversed(classified_highs) if x["type"] == "LH"), None),
+        "lastLL": next((x for x in reversed(classified_lows) if x["type"] == "LL"), None),
+        "counts": {
+            "HH": sum(x["type"] == "HH" for x in swing_highs),
+            "HL": sum(x["type"] == "HL" for x in swing_lows),
+            "LH": sum(x["type"] == "LH" for x in swing_highs),
+            "LL": sum(x["type"] == "LL" for x in swing_lows)
+        },
+        "score": score
+    }
 
 
 def _unique_zone_levels(points, current_price, side, tolerance):
