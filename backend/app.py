@@ -308,12 +308,12 @@ def fetch_market_data(symbol, timeframe='15m'):
     return None
 
 
-MIN_STRUCTURE_CANDLES = 41
+MIN_STRUCTURE_CANDLES = 21
 STRUCTURE_LOOKBACK = 120
-LEFT_SWING_BARS = 20
-RIGHT_SWING_BARS = 20
-MAX_STRUCTURE_MARKERS = 6
-MARKER_MIN_GAP_CANDLES = 20
+LEFT_SWING_BARS = 10
+RIGHT_SWING_BARS = 10
+MAX_STRUCTURE_MARKERS = 8
+MARKER_MIN_GAP_CANDLES = 10
 
 def detect_market_structure(
     data,
@@ -324,16 +324,11 @@ def detect_market_structure(
     min_gap=MARKER_MIN_GAP_CANDLES
 ):
     """
-    Confirm HH / HL / LH / LL using a strict 20-left / 20-right bar rule.
+    Confirm swings with 10 candles on the left and 10 candles on the right.
+    Minimum required candles: 10 + pivot + 10 = 21.
 
-    A swing high at bar i is confirmed only when its High is the highest
-    among the previous 20 bars and the next 20 bars.
-
-    A swing low at bar i is confirmed only when its Low is the lowest
-    among the previous 20 bars and the next 20 bars.
-
-    Because the pivot candle itself is included, at least 41 completed
-    candles are required to confirm even one structure point.
+    A swing high is confirmed only after the right-side 10 candles exist.
+    A swing low is confirmed only after the right-side 10 candles exist.
     """
     minimum_candles = left_bars + right_bars + 1
     empty = {
@@ -362,7 +357,6 @@ def detect_market_structure(
     if data is None:
         return empty
 
-    # Only completed candles are considered.
     d = data.dropna(subset=["Open", "High", "Low", "Close"]).copy()
     if len(d) < minimum_candles:
         empty["candlesAnalyzed"] = len(d)
@@ -370,86 +364,55 @@ def detect_market_structure(
         return empty
 
     d = d.tail(max(lookback, minimum_candles)).copy()
+    highs, lows = [], []
 
-    highs = []
-    lows = []
-
-    # Last 20 candles cannot yet be confirmed because their right-side
-    # confirmation window is incomplete.
     for i in range(left_bars, len(d) - right_bars):
-        high = float(d["High"].iloc[i])
-        low = float(d["Low"].iloc[i])
+        high, low = float(d["High"].iloc[i]), float(d["Low"].iloc[i])
 
-        left_highs = d["High"].iloc[i-left_bars:i]
-        right_highs = d["High"].iloc[i+1:i+1+right_bars]
+        lh = d["High"].iloc[i-left_bars:i]
+        rh = d["High"].iloc[i+1:i+1+right_bars]
+        ll = d["Low"].iloc[i-left_bars:i]
+        rl = d["Low"].iloc[i+1:i+1+right_bars]
 
-        left_lows = d["Low"].iloc[i-left_bars:i]
-        right_lows = d["Low"].iloc[i+1:i+1+right_bars]
+        is_high = high > float(lh.max()) and high >= float(rh.max())
+        is_low = low < float(ll.min()) and low <= float(rl.min())
 
-        is_swing_high = (
-            high > float(left_highs.max()) and
-            high >= float(right_highs.max())
-        )
-
-        is_swing_low = (
-            low < float(left_lows.min()) and
-            low <= float(right_lows.min())
-        )
-
-        if is_swing_high:
+        if is_high:
             if not highs or i - highs[-1][0] >= min_gap:
                 highs.append((i, high))
             elif high > highs[-1][1]:
                 highs[-1] = (i, high)
 
-        if is_swing_low:
+        if is_low:
             if not lows or i - lows[-1][0] >= min_gap:
                 lows.append((i, low))
             elif low < lows[-1][1]:
                 lows[-1] = (i, low)
 
-    swing_highs = []
-    swing_lows = []
+    swing_highs, swing_lows = [], []
 
     for pos, (i, price) in enumerate(highs):
-        swing_type = "SH" if pos == 0 else (
-            "HH" if price > highs[pos - 1][1] else "LH"
-        )
+        typ = "SH" if pos == 0 else ("HH" if price > highs[pos-1][1] else "LH")
         swing_highs.append({
-            "index": int(i),
-            "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
-            "price": round(float(price), 2),
-            "type": swing_type,
-            "confirmed": True,
-            "leftBars": left_bars,
-            "rightBars": right_bars,
-            "candlesAgo": int(len(d) - 1 - i)
+            "index": int(i), "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
+            "price": round(float(price), 2), "type": typ, "confirmed": True,
+            "leftBars": left_bars, "rightBars": right_bars,
+            "candlesAgo": int(len(d)-1-i)
         })
 
     for pos, (i, price) in enumerate(lows):
-        swing_type = "SL" if pos == 0 else (
-            "HL" if price > lows[pos - 1][1] else "LL"
-        )
+        typ = "SL" if pos == 0 else ("HL" if price > lows[pos-1][1] else "LL")
         swing_lows.append({
-            "index": int(i),
-            "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
-            "price": round(float(price), 2),
-            "type": swing_type,
-            "confirmed": True,
-            "leftBars": left_bars,
-            "rightBars": right_bars,
-            "candlesAgo": int(len(d) - 1 - i)
+            "index": int(i), "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
+            "price": round(float(price), 2), "type": typ, "confirmed": True,
+            "leftBars": left_bars, "rightBars": right_bars,
+            "candlesAgo": int(len(d)-1-i)
         })
 
-    classified_highs = [
-        x for x in swing_highs if x["type"] in ("HH", "LH")
-    ]
-    classified_lows = [
-        x for x in swing_lows if x["type"] in ("HL", "LL")
-    ]
-
-    last_high = classified_highs[-1]["type"] if classified_highs else None
-    last_low = classified_lows[-1]["type"] if classified_lows else None
+    ch = [x for x in swing_highs if x["type"] in ("HH", "LH")]
+    cl = [x for x in swing_lows if x["type"] in ("HL", "LL")]
+    last_high = ch[-1]["type"] if ch else None
+    last_low = cl[-1]["type"] if cl else None
 
     if last_high == "HH" and last_low == "HL":
         trend, score = "bullish", 2
@@ -458,10 +421,7 @@ def detect_market_structure(
     else:
         trend, score = "neutral", 0
 
-    structure = sorted(
-        classified_highs + classified_lows,
-        key=lambda x: x["index"]
-    )[-max_markers:]
+    structure = sorted(ch + cl, key=lambda x: x["index"])[-max_markers:]
 
     return {
         "valid": True,
@@ -470,18 +430,16 @@ def detect_market_structure(
         "candlesAnalyzed": len(d),
         "completedCandles": len(d),
         "enoughCandles": True,
-        "leftBars": left_bars,
-        "rightBars": right_bars,
+        "leftBars": left_bars, "rightBars": right_bars,
         "trend": trend,
         "structure": structure,
-        "swingHighs": swing_highs[-6:],
-        "swingLows": swing_lows[-6:],
-        "lastHighType": last_high,
-        "lastLowType": last_low,
-        "lastHH": next((x for x in reversed(classified_highs) if x["type"] == "HH"), None),
-        "lastHL": next((x for x in reversed(classified_lows) if x["type"] == "HL"), None),
-        "lastLH": next((x for x in reversed(classified_highs) if x["type"] == "LH"), None),
-        "lastLL": next((x for x in reversed(classified_lows) if x["type"] == "LL"), None),
+        "swingHighs": swing_highs[-8:],
+        "swingLows": swing_lows[-8:],
+        "lastHighType": last_high, "lastLowType": last_low,
+        "lastHH": next((x for x in reversed(ch) if x["type"] == "HH"), None),
+        "lastHL": next((x for x in reversed(cl) if x["type"] == "HL"), None),
+        "lastLH": next((x for x in reversed(ch) if x["type"] == "LH"), None),
+        "lastLL": next((x for x in reversed(cl) if x["type"] == "LL"), None),
         "counts": {
             "HH": sum(x["type"] == "HH" for x in swing_highs),
             "HL": sum(x["type"] == "HL" for x in swing_lows),
@@ -491,6 +449,182 @@ def detect_market_structure(
         "score": score
     }
 
+
+def calculate_global_market_bias(global_markets):
+    """Build morning bias from the returned global indices."""
+    if not global_markets:
+        return {"bias": "neutral", "score": 0, "positive": 0, "negative": 0, "total": 0}
+
+    items = []
+    if isinstance(global_markets, dict):
+        for region, values in global_markets.items():
+            if isinstance(values, list):
+                items.extend(values)
+    elif isinstance(global_markets, list):
+        items = global_markets
+
+    positive = negative = 0
+    for item in items:
+        change = item.get("change", item.get("changePercent", 0)) if isinstance(item, dict) else 0
+        try:
+            change = float(change)
+        except (TypeError, ValueError):
+            change = 0
+        if change > 0:
+            positive += 1
+        elif change < 0:
+            negative += 1
+
+    total = positive + negative
+    score = positive - negative
+    if score >= 2:
+        bias = "bullish"
+    elif score <= -2:
+        bias = "bearish"
+    else:
+        bias = "neutral"
+
+    return {"bias": bias, "score": score, "positive": positive, "negative": negative, "total": total}
+
+
+def generate_trade_signal_v2(data, structure, cpr, global_markets=None):
+    """
+    BUY:
+      1. Morning global market bias bullish, AND
+      2. Price is near/above CPR TC, OR
+      3. Current/next candle closes above the confirmed HL candle high.
+
+    SELL:
+      1. Morning global market bias bearish, AND
+      2. Price is near/below CPR BC, OR
+      3. Current/next candle closes below the confirmed LH candle low.
+
+    HOLD when conditions do not align.
+
+    Stop-loss and target always use minimum risk:reward of 1:2.
+    """
+    result = {
+        "signal": "HOLD", "entry": None, "stopLoss": None, "target": None,
+        "riskReward": 0, "reason": "Conditions not aligned", "confidence": 0
+    }
+
+    if data is None or len(data) < MIN_STRUCTURE_CANDLES:
+        result["reason"] = "Waiting for minimum 21 candles"
+        return result
+
+    df = data.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+    if len(df) < MIN_STRUCTURE_CANDLES:
+        result["reason"] = "Waiting for valid candles"
+        return result
+
+    latest = df.iloc[-1]
+    previous = df.iloc[-2]
+    close = float(latest["Close"])
+    atr = float((df["High"] - df["Low"]).tail(14).mean())
+    if not atr or atr <= 0:
+        atr = max(close * 0.002, 1.0)
+
+    bias_info = calculate_global_market_bias(global_markets)
+    bias = bias_info["bias"]
+
+    # CPR values can be dicts or scalar values.
+    def cpr_value(keys):
+        if not isinstance(cpr, dict):
+            return None
+        for key in keys:
+            value = cpr.get(key)
+            if isinstance(value, dict):
+                value = value.get("value", value.get("price"))
+            try:
+                if value is not None:
+                    return float(value)
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    tc = cpr_value(["tc", "TC", "topCentral", "top"])
+    bc = cpr_value(["bc", "BC", "bottomCentral", "bottom"])
+
+    near_distance = max(atr * 0.35, close * 0.0015)
+    near_tc = tc is not None and abs(close - tc) <= near_distance
+    near_bc = bc is not None and abs(close - bc) <= near_distance
+    above_tc = tc is not None and close >= tc
+    below_bc = bc is not None and close <= bc
+
+    last_hl = structure.get("lastHL") if isinstance(structure, dict) else None
+    last_lh = structure.get("lastLH") if isinstance(structure, dict) else None
+
+    hl_breakout = False
+    lh_breakdown = False
+
+    if last_hl and last_hl.get("index") is not None:
+        idx = int(last_hl["index"])
+        if 0 <= idx < len(df):
+            hl_high = float(df["High"].iloc[idx])
+            hl_breakout = close > hl_high and float(previous["Close"]) <= hl_high
+
+    if last_lh and last_lh.get("index") is not None:
+        idx = int(last_lh["index"])
+        if 0 <= idx < len(df):
+            lh_low = float(df["Low"].iloc[idx])
+            lh_breakdown = close < lh_low and float(previous["Close"]) >= lh_low
+
+    bullish_structure = structure.get("trend") == "bullish" if isinstance(structure, dict) else False
+    bearish_structure = structure.get("trend") == "bearish" if isinstance(structure, dict) else False
+
+    # BUY: global bias + bullish structure + CPR TC location or HL breakout.
+    buy_setup = bias == "bullish" and bullish_structure and (near_tc or above_tc or hl_breakout)
+
+    # SELL: global bias + bearish structure + CPR BC location or LH breakdown.
+    sell_setup = bias == "bearish" and bearish_structure and (near_bc or below_bc or lh_breakdown)
+
+    if buy_setup:
+        entry = close
+        candidate_sl = float(last_hl["price"]) if last_hl else entry - atr
+        stop = min(candidate_sl - atr * 0.10, entry - atr * 0.75)
+        risk = entry - stop
+        target = entry + risk * 2.0
+        result.update({
+            "signal": "BUY", "entry": round(entry, 2), "stopLoss": round(stop, 2),
+            "target": round(target, 2), "riskReward": 2.0,
+            "confidence": 80 if hl_breakout else 72,
+            "reason": "Bullish global bias + HH/HL structure + " +
+                      ("HL breakout" if hl_breakout else "near/above CPR TC")
+        })
+
+    elif sell_setup:
+        entry = close
+        candidate_sl = float(last_lh["price"]) if last_lh else entry + atr
+        stop = max(candidate_sl + atr * 0.10, entry + atr * 0.75)
+        risk = stop - entry
+        target = entry - risk * 2.0
+        result.update({
+            "signal": "SELL", "entry": round(entry, 2), "stopLoss": round(stop, 2),
+            "target": round(target, 2), "riskReward": 2.0,
+            "confidence": 80 if lh_breakdown else 72,
+            "reason": "Bearish global bias + LH/LL structure + " +
+                      ("LH breakdown" if lh_breakdown else "near/below CPR BC")
+        })
+    else:
+        result["reason"] = (
+            f"HOLD: global bias={bias}; "
+            f"structure={structure.get('trend', 'neutral') if isinstance(structure, dict) else 'neutral'}; "
+            f"waiting for CPR or structure breakout confirmation"
+        )
+
+    result["globalBias"] = bias_info
+    result["conditions"] = {
+        "nearTC": near_tc, "aboveTC": above_tc,
+        "nearBC": near_bc, "belowBC": below_bc,
+        "hlBreakout": hl_breakout, "lhBreakdown": lh_breakdown
+    }
+    return result
+
+
+
+# Compatibility wrapper: existing processing code can keep calling generate_trade_signal.
+def generate_trade_signal(data, structure, cpr, global_markets=None, *args, **kwargs):
+    return generate_trade_signal_v2(data, structure, cpr, global_markets)
 
 def _unique_zone_levels(points, current_price, side, tolerance):
     values = sorted([float(x["price"]) for x in points])
