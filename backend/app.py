@@ -895,7 +895,75 @@ def get_market_data():
             prediction=prediction
         )
 
-        provider_available = nifty_data_raw is not None
+        # Keep a stable response schema even when one provider/ticker is temporarily
+        # unavailable. Frontends should distinguish "connected/degraded" from "offline".
+        if nifty_data is None:
+            nifty_data = {
+                'available': False,
+                'symbol': '^NSEI',
+                'current': None,
+                'change': None,
+                'changePercent': None,
+                'cpr': {},
+                'support': [],
+                'resistance': [],
+                'marketStructure': {
+                    'valid': False,
+                    'enoughCandles': False,
+                    'trend': 'neutral',
+                    'structure': []
+                },
+                'tradeSignal': {
+                    'signal': 'HOLD',
+                    'entry': None,
+                    'stopLoss': None,
+                    'target': None,
+                    'riskReward': 0,
+                    'confidence': 0,
+                    'reason': 'Nifty market data temporarily unavailable'
+                },
+                'chartOverlays': {'cpr': [], 'support': [], 'resistance': [], 'structureMarkers': []},
+                'candleData': [],
+                'dataPoints': 0,
+                'dataProviderStatus': 'unavailable'
+            }
+
+        if banknifty_data is None:
+            banknifty_data = {
+                'available': False,
+                'symbol': '^NSEBANK',
+                'current': None,
+                'change': None,
+                'changePercent': None,
+                'cpr': {},
+                'support': [],
+                'resistance': [],
+                'marketStructure': {
+                    'valid': False,
+                    'enoughCandles': False,
+                    'trend': 'neutral',
+                    'structure': []
+                },
+                'tradeSignal': {
+                    'signal': 'HOLD',
+                    'entry': None,
+                    'stopLoss': None,
+                    'target': None,
+                    'riskReward': 0,
+                    'confidence': 0,
+                    'reason': 'Bank Nifty market data temporarily unavailable'
+                },
+                'chartOverlays': {'cpr': [], 'support': [], 'resistance': [], 'structureMarkers': []},
+                'candleData': [],
+                'dataPoints': 0,
+                'dataProviderStatus': 'unavailable'
+            }
+
+        provider_available = bool(
+            nifty_data_raw is not None or
+            banknifty_data.get('available', bool(banknifty_data.get('candleData'))) or
+            nifty_data.get('available', bool(nifty_data.get('candleData')))
+        )
 
         return jsonify({
             'timeframe': timeframe,
@@ -909,7 +977,10 @@ def get_market_data():
             'status': 'success' if provider_available else 'degraded',
             'data_provider_status': (
                 'available' if provider_available else 'temporarily_unavailable'
-            )
+            ),
+            'nifty_available': bool(nifty_data.get('candleData')),
+            'banknifty_available': bool(banknifty_data.get('candleData')),
+            'response_version': '3.1'
         })
     except Exception as e:
         logger.exception("Global handler exception")
