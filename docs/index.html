@@ -1324,36 +1324,114 @@ function setConnection(connected, message) {
 
         function updateStrategySignal() {
             const container = document.getElementById('strategyCard');
-            const market = currentChart === 'nifty' ? marketData?.nifty : marketData?.bankNifty;
-            const signal = market?.tradeSignal;
-            const structure = market?.marketStructure;
-            if (!market || !signal) {
+            if (!container) return;
+
+            const market = currentChart === 'nifty'
+                ? marketData?.nifty
+                : (marketData?.bankNifty || marketData?.banknifty);
+
+            const signal = market?.tradeSignal || market?.signal || {};
+            const structure = market?.marketStructure || {};
+            if (!market || !Object.keys(signal).length) {
                 container.innerHTML = '<div class="strategy-empty">Strategy signal is unavailable. Check that the updated backend is deployed.</div>';
                 return;
             }
-            const side = String(signal.signal || 'HOLD').toUpperCase();
+
+            const side = String(signal.signal || signal.direction || 'HOLD').toUpperCase();
             const sideClass = side.toLowerCase();
             const icon = side === 'BUY' ? '🟢' : side === 'SELL' ? '🔴' : '🟡';
-            const fmt = v => (v === null || v === undefined || Number.isNaN(Number(v))) ? '--' : '₹' + Number(v).toLocaleString('en-IN', {maximumFractionDigits: 2});
-            const structureTags = (structure?.structure || []).slice(-8).map(x => `<span class="structure-tag">${x.type} · ${fmt(x.price)}</span>`).join('') || `<span class="structure-tag">${String(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span>`;
-            const reasons = (signal.reasons || []).map(r => `<li>✓ ${r}</li>`).join('') || '<li>Waiting for enough confirmation.</li>';
-            const prediction = marketData?.prediction || {};
+            const num = v => Number(v);
+            const valid = v => Number.isFinite(num(v));
+            const fmt = v => valid(v)
+                ? '₹' + num(v).toLocaleString('en-IN', {maximumFractionDigits: 2})
+                : '--';
+
+            // Never trust a displayed R:R blindly: calculate it from the actual
+            // Entry, Stop Loss and Target returned by the backend.
+            const entry = valid(signal.entry) ? num(signal.entry) : (valid(market.current) ? num(market.current) : null);
+            const stop = valid(signal.stopLoss) ? num(signal.stopLoss) : null;
+            const target = valid(signal.target) ? num(signal.target) : null;
+
+            let actualRisk = valid(signal.risk) ? Math.abs(num(signal.risk)) : null;
+            let actualReward = valid(signal.reward) ? Math.abs(num(signal.reward)) : null;
+
+            if (side === 'BUY' && entry !== null && stop !== null && target !== null) {
+                actualRisk = entry - stop;
+                actualReward = target - entry;
+            } else if (side === 'SELL' && entry !== null && stop !== null && target !== null) {
+                actualRisk = stop - entry;
+                actualReward = entry - target;
+            }
+
+            const actualRR = actualRisk && actualRisk > 0 && actualReward !== null
+                ? actualReward / actualRisk
+                : null;
+
+            const rrText = actualRR !== null ? `1:${actualRR.toFixed(2)}` : '--';
+            const rrWarning = (side === 'BUY' || side === 'SELL') && actualRR !== null && actualRR < 2;
+
+            const structureTags = (structure?.structure || []).slice(-8).map(x =>
+                `<span class="structure-tag">${x.type} · ${fmt(x.price)}</span>`
+            ).join('') || `<span class="structure-tag">${String(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span>`;
+
+            const reasonsList = Array.isArray(signal.reasons)
+                ? signal.reasons
+                : (signal.reason ? [signal.reason] : []);
+            const reasons = reasonsList.map(r => `<li>✓ ${r}</li>`).join('')
+                || '<li>Waiting for enough confirmation.</li>';
+
+            const prediction = marketData?.prediction || market?.prediction || {};
+            const globalBias = signal.globalBias || signal.globalMarketBias || {};
+            const biasText = typeof globalBias === 'object'
+                ? (globalBias.bias || prediction.direction || 'neutral')
+                : (globalBias || prediction.direction || 'neutral');
+
+            const nearestSupport = signal.nearestSupport?.value ?? signal.support;
+            const nearestResistance = signal.nearestResistance?.value ?? signal.resistance;
+            const entryZone = signal.entryZone || (
+                side === 'BUY' ? 'CPR TC / HL confirmation' :
+                side === 'SELL' ? 'CPR BC / LH confirmation' : 'Waiting for confirmation'
+            );
+
             container.innerHTML = `
                 <div class="strategy-top">
                     <div>
                         <div class="strategy-title">🎯 ${currentChart === 'nifty' ? 'NIFTY 50' : 'BANK NIFTY'} STRATEGY SIGNAL</div>
-                        <div class="strategy-meta"><span class="strategy-pill">Prediction: ${(prediction.direction || 'neutral').toUpperCase()}</span><span class="strategy-pill">CPR: ${(signal.cprPosition || 'inside').toUpperCase()}</span><span class="strategy-pill">Score: ${signal.score ?? '--'}</span></div>
+                        <div class="strategy-meta">
+                            <span class="strategy-pill">Prediction: ${String(prediction.direction || biasText || 'neutral').toUpperCase()}</span>
+                            <span class="strategy-pill">Global: ${String(biasText).toUpperCase()}</span>
+                            <span class="strategy-pill">CPR: ${String(signal.cprPosition || (signal.conditions?.nearTC ? 'near TC' : signal.conditions?.nearBC ? 'near BC' : 'inside')).toUpperCase()}</span>
+                            <span class="strategy-pill">Score: ${signal.score ?? '--'}</span>
+                        </div>
                     </div>
                     <div class="strategy-badge ${sideClass}">${icon} ${side}</div>
                 </div>
-                <div class="strategy-meta"><span class="strategy-pill">Strength: ${(signal.strength || 'weak').toUpperCase()}</span><span class="strategy-pill">Confidence: ${signal.confidence ?? '--'}%</span><span class="strategy-pill">Structure: ${(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span></div>
-                <div class="strategy-grid">
-                    <div class="strategy-value"><span>ENTRY</span><strong>${fmt(signal.entry ?? market.current)}</strong></div>
-                    <div class="strategy-value"><span>STOP LOSS</span><strong>${fmt(signal.stopLoss)}</strong></div>
-                    <div class="strategy-value"><span>TARGET</span><strong>${fmt(signal.target)}</strong></div>
+
+                <div class="strategy-meta">
+                    <span class="strategy-pill">Strength: ${String(signal.strength || (side === 'HOLD' ? 'waiting' : 'strong')).toUpperCase()}</span>
+                    <span class="strategy-pill">Confidence: ${signal.confidence ?? '--'}%</span>
+                    <span class="strategy-pill">Structure: ${String(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span>
+                    <span class="strategy-pill">Verified R:R: ${rrText}${rrWarning ? ' ⚠️' : ''}</span>
                 </div>
+
+                <div class="strategy-grid">
+                    <div class="strategy-value"><span>ENTRY</span><strong>${fmt(entry)}</strong></div>
+                    <div class="strategy-value"><span>STOP LOSS</span><strong>${fmt(stop)}</strong></div>
+                    <div class="strategy-value"><span>TARGET</span><strong>${fmt(target)}</strong></div>
+                </div>
+
+                <div class="strategy-grid" style="margin-top:10px">
+                    <div class="strategy-value"><span>ACTUAL RISK</span><strong>${fmt(actualRisk)}</strong></div>
+                    <div class="strategy-value"><span>POTENTIAL REWARD</span><strong>${fmt(actualReward)}</strong></div>
+                    <div class="strategy-value"><span>BEST ENTRY ZONE</span><strong style="font-size:14px">${entryZone}</strong></div>
+                </div>
+
+                ${rrWarning ? '<div class="strategy-empty" style="margin-top:10px;color:#fbbf24">⚠️ Trade rejected by risk filter: actual R:R is below 1:2.</div>' : ''}
                 <div class="structure-row">${structureTags}</div>
-                <div class="strategy-meta"><span class="strategy-pill">Support: ${fmt(signal.nearestSupport?.value)}</span><span class="strategy-pill">Resistance: ${fmt(signal.nearestResistance?.value)}</span></div>
+                <div class="strategy-meta">
+                    <span class="strategy-pill">Support: ${fmt(nearestSupport)}</span>
+                    <span class="strategy-pill">Resistance: ${fmt(nearestResistance)}</span>
+                </div>
                 <ul class="strategy-reasons">${reasons}</ul>`;
         }
 
