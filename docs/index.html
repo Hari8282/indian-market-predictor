@@ -1814,6 +1814,7 @@ function resetTradingChart(){
   if(!window.LightweightCharts) throw new Error('Lightweight Charts failed to load');
   if(tvChart){try{tvChart.remove()}catch(e){}}
   if(chartResizeObserver){try{chartResizeObserver.disconnect()}catch(e){}}
+  structureMarkersPluginApi=null;
   el.innerHTML='';
   tvChart=LightweightCharts.createChart(el,{
     width:Math.max(320,el.clientWidth||320),height:Math.max(360,el.clientHeight||460),
@@ -1835,6 +1836,26 @@ function lineOverlay(name,value,opts={}){
   if(!candleSeries||!Number.isFinite(price)) return;
   candleSeries.createPriceLine({price,color:opts.color||'#64748b',lineWidth:opts.width||1,lineStyle:opts.style??LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:name});
 }
+let structureMarkersPluginApi=null;
+function addStructureMarkersCompat(series,markers){
+  const LC=window.LightweightCharts;
+  if(!series) return;
+  try{
+    if(LC && typeof LC.createSeriesMarkers==='function'){
+      // Lightweight Charts v5: markers are managed via a separate plugin instance.
+      if(structureMarkersPluginApi && typeof structureMarkersPluginApi.setMarkers==='function'){
+        structureMarkersPluginApi.setMarkers(markers);
+      }else{
+        structureMarkersPluginApi=LC.createSeriesMarkers(series,markers);
+      }
+    }else if(typeof series.setMarkers==='function'){
+      // Older API fallback.
+      series.setMarkers(markers);
+    }
+  }catch(e){
+    console.error('Failed to set chart markers:',e);
+  }
+}
 function normalizeCandles(market){
   const raw=market?.candleData||market?.candles||market?.candlestickData||market?.chartData||market?.ohlcv||[];
   if(!Array.isArray(raw)) return [];
@@ -1843,6 +1864,11 @@ function normalizeCandles(market){
     if(Array.isArray(x)) return {time:toUnixTime(x[0]),open:Number(x[1]),high:Number(x[2]),low:Number(x[3]),close:Number(x[4]),volume:Number(x[5]||0)};
     return {time:toUnixTime(x.time??x.timestamp??x.datetime??x.date),open:Number(x.open??x.Open),high:Number(x.high??x.High),low:Number(x.low??x.Low),close:Number(x.close??x.Close),volume:Number(x.volume??x.Volume??0)};
   }).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.open)&&Number.isFinite(x.high)&&Number.isFinite(x.low)&&Number.isFinite(x.close)&&!seen.has(x.time)&&(seen.add(x.time),true)).sort((a,b)=>a.time-b.time);
+}
+function normalizeMarketForChart(market){
+  if(!market||typeof market!=='object') return null;
+  const candleData=normalizeCandles(market);
+  return {...market,candleData};
 }
 function renderProfessionalChart(market,name){
   market=normalizeMarketForChart(market);
