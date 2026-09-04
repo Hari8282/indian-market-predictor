@@ -747,6 +747,11 @@
 <style id="strategy-signal-chart-style">
 .strategy-buy{color:#00c853;font-weight:800}.strategy-sell{color:#ff1744;font-weight:800}.strategy-hold{color:#f59e0b;font-weight:800}
 </style>
+
+<style id="frontend-runtime-fix">
+.strategy-empty{white-space:normal}
+</style>
+
 </head>
 <body>
     <div class="loading-overlay" id="loadingOverlay">
@@ -1057,74 +1062,73 @@ function setConnection(connected, message) {
 
         function normalizeBackendPayload(raw) {
             const root = raw && typeof raw === 'object' ? raw : {};
-            const containers = [];
-            const queue = [root];
-            const seen = new Set();
+            const queue = [root], seen = new Set(), objects = [];
 
             while (queue.length) {
                 const obj = queue.shift();
                 if (!obj || typeof obj !== 'object' || seen.has(obj)) continue;
-                seen.add(obj);
-                containers.push(obj);
-
-                for (const value of Object.values(obj)) {
-                    if (value && typeof value === 'object') queue.push(value);
+                seen.add(obj); objects.push(obj);
+                for (const key of ['data','result','response','payload','marketData','markets']) {
+                    if (obj[key] && typeof obj[key] === 'object') queue.push(obj[key]);
                 }
             }
 
             const aliases = {
-                nifty: ['nifty','nifty50','nifty_50','NIFTY','NIFTY50','nseNifty','niftyData'],
-                bankNifty: ['bankNifty','banknifty','bank_nifty','NIFTYBANK','BANKNIFTY','nseBankNifty','bankNiftyData']
+                nifty: ['nifty','nifty50','nifty_50','nseNifty','niftyData'],
+                bankNifty: ['bankNifty','banknifty','bank_nifty','niftyBank','nseBankNifty','bankNiftyData']
             };
 
-            function pick(obj, names) {
+            const pick = (obj, names) => {
                 const keys = Object.keys(obj || {});
                 for (const name of names) {
                     if (obj[name] && typeof obj[name] === 'object' && !Array.isArray(obj[name])) return obj[name];
-                    const actual = keys.find(k => k.toLowerCase() === name.toLowerCase());
+                    const actual = keys.find(k => k.toLowerCase() === String(name).toLowerCase());
                     if (actual && obj[actual] && typeof obj[actual] === 'object' && !Array.isArray(obj[actual])) return obj[actual];
                 }
                 return null;
-            }
+            };
 
-            let nifty = null;
-            let bankNifty = null;
-
-            for (const obj of containers) {
+            let nifty = null, bankNifty = null;
+            for (const obj of objects) {
                 nifty ||= pick(obj, aliases.nifty);
                 bankNifty ||= pick(obj, aliases.bankNifty);
             }
 
-            // Find market-like objects by symbol/name even if nested in arrays.
-            for (const obj of containers) {
-                for (const value of Object.values(obj)) {
-                    const arr = Array.isArray(value) ? value : null;
-                    if (!arr) continue;
-                    for (const item of arr) {
-                        if (!item || typeof item !== 'object') continue;
-                        const id = String(item.symbol || item.name || item.market || item.key || item.id || '').toUpperCase();
-                        if (!nifty && /(^|[^A-Z])NIFTY(50)?([^A-Z]|$)/.test(id) && !id.includes('BANK')) nifty = item;
-                        if (!bankNifty && (id.includes('BANKNIFTY') || id.includes('NIFTYBANK'))) bankNifty = item;
-                    }
+            // Support arrays of named market objects.
+            for (const obj of objects) {
+                if (!Array.isArray(obj)) continue;
+                for (const item of obj) {
+                    if (!item || typeof item !== 'object') continue;
+                    const id = safeUpper(item.symbol || item.name || item.market || item.key || item.id || '');
+                    if (!nifty && id.includes('NIFTY') && !id.includes('BANK')) nifty = item;
+                    if (!bankNifty && (id.includes('BANKNIFTY') || id.includes('NIFTYBANK') || (id.includes('BANK') && id.includes('NIFTY')))) bankNifty = item;
                 }
             }
 
-            const shared = containers.find(o => o.globalMarkets || o.prediction || o.timeframe) || root;
+            if (!nifty && !bankNifty) {
+                const keys = Object.keys(root).join(', ') || '(no top-level keys)';
+                throw new Error('Backend connected but Nifty/Bank Nifty data was not recognized. Response keys: ' + keys);
+            }
 
+            const shared = objects.find(o => pick(o, aliases.nifty) || pick(o, aliases.bankNifty)) || root;
             return {
                 ...shared,
-                nifty: nifty || null,
-                bankNifty: bankNifty || null,
-                banknifty: bankNifty || null,
-                globalMarkets: shared.globalMarkets || root.globalMarkets || {},
-                prediction: shared.prediction || root.prediction || root.marketPrediction || {},
-                status: raw.status || shared.status || 'success',
-                data_provider_status: raw.data_provider_status || shared.data_provider_status || 'unknown',
-                nifty_available: Boolean(nifty?.candleData?.length),
-                banknifty_available: Boolean(bankNifty?.candleData?.length)
+                nifty: nifty || {},
+                bankNifty: bankNifty || {},
+                banknifty: bankNifty || {},
+                globalMarkets: shared.globalMarkets || root.globalMarkets || shared.global || root.global || [],
+                prediction: shared.prediction || root.prediction || shared.marketPrediction || root.marketPrediction || {}
             };
         }
 
+
+        function safeUpper(value, fallback = '--') {
+            if (value === undefined || value === null) return fallback;
+            return String(value).toUpperCase();
+        }
+        function safeText(value, fallback = '--') {
+            return (value === undefined || value === null || value === '') ? fallback : String(value);
+        }
 
         async function fetchMarketData() {
             const loadingOverlay = document.getElementById('loadingOverlay');
@@ -1132,7 +1136,7 @@ function setConnection(connected, message) {
             const refreshBtn = document.getElementById('refreshBtn');
 
             if (!autoRefresh && loadingOverlay) loadingOverlay.classList.add('show');
-            if (loadingStatus) loadingStatus.textContent = `Fetching ${currentTimeframe.toUpperCase()} data...`;
+            if (loadingStatus) loadingStatus.textContent = `Fetching ${safeUpper(currentTimeframe)} data...`;
             if (refreshBtn) refreshBtn.disabled = true;
 
             const controller = new AbortController();
@@ -1158,10 +1162,6 @@ function setConnection(connected, message) {
                 // Support both direct and wrapped backend payloads.
                 marketData = normalizeBackendPayload(payload);
 
-                if (!marketData.nifty && !marketData.bankNifty) {
-                    console.warn('Indian market objects missing; backend/global data may still be available.');
-                }
-
                 setConnection(true, 'Connected');
                 document.getElementById('configBanner')?.classList.remove('show');
 
@@ -1172,14 +1172,8 @@ function setConnection(connected, message) {
                     ? (marketData.bankNifty || marketData.banknifty)
                     : (marketData.nifty || marketData.bankNifty || marketData.banknifty);
 
-                if (typeof renderProfessionalChart === 'function' && market && (market.candleData || []).length) {
-                    try {
-                        renderProfessionalChart(market, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
-                    } catch (chartError) {
-                        console.error('Chart error:', chartError);
-                        const cs = document.getElementById('proChartStatus');
-                        if (cs) cs.textContent = 'Backend connected • chart data unavailable';
-                    }
+                if (typeof renderProfessionalChart === 'function' && market) {
+                    renderProfessionalChart(market, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
                 }
 
                 // Fallback to original canvas chart if professional chart cannot render.
@@ -1189,9 +1183,10 @@ function setConnection(connected, message) {
                 if (loadingStatus) loadingStatus.textContent = 'Market data updated';
             } catch (error) {
                 console.error('Market API error:', error);
-                setConnection(false, `Offline: ${error.message}`);
+                const message = error && error.message ? error.message : String(error || 'Unknown error');
+                setConnection(false, `Offline: ${message}`);
                 document.getElementById('configBanner')?.classList.add('show');
-                if (loadingStatus) loadingStatus.textContent = error.message;
+                if (loadingStatus) loadingStatus.textContent = message;
             } finally {
                 clearTimeout(timeout);
                 if (refreshBtn) refreshBtn.disabled = false;
@@ -1237,12 +1232,11 @@ function setConnection(connected, message) {
         }
 
         function updatePrediction() {
-            const pred = marketData.prediction || {direction:'neutral',confidence:0,signals:{}};
-            const signals = pred.signals || {};
-            const market = currentChart === 'nifty' ? (marketData.nifty || {}) : (marketData.bankNifty || marketData.banknifty || {});
-            const cpr = market.cpr || {};
-            const cprBasis = market.cpr?.basis || 'Daily';
-            const cprPeriod = cpr.period_label || 'N/A';
+            const pred = marketData.prediction;
+            const signals = (pred.signals && typeof pred.signals === 'object') ? pred.signals : {};
+            const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
+            const cprBasis = safeText(market.cpr?.basis, 'Daily');
+            const cprPeriod = market.cpr?.period_label || 'N/A';
             
             const dirEl = document.getElementById('predictionDirection');
             dirEl.className = `prediction-direction ${pred.direction === 'bullish' ? 'bullish-text' : pred.direction === 'bearish' ? 'bearish-text' : ''}`;
@@ -1260,9 +1254,9 @@ function setConnection(connected, message) {
                         📊 <strong>${cprBasis} CPR</strong> | ${cprPeriod}
                     </div>
                     <div style="display: flex; gap: 10px; font-size: 11px; color: #94a3b8; flex-wrap: wrap;">
-                        <span>PP: ${market.cpr?.pivot == null ? '--' : '₹' + market.cpr.pivot}</span>
-                        <span>TC: ${market.cpr?.tc == null ? '--' : '₹' + market.cpr.tc}</span>
-                        <span>BC: ${market.cpr?.bc == null ? '--' : '₹' + market.cpr.bc}</span>
+                        <span>PP: ₹${market.cpr.pivot}</span>
+                        <span>TC: ₹${market.cpr.tc}</span>
+                        <span>BC: ₹${market.cpr.bc}</span>
                     </div>
                 `;
             }
@@ -1280,7 +1274,7 @@ function setConnection(connected, message) {
                 signalsHTML += `
                     <div class="signal-item">
                         <span style="color: #cbd5e1;">${signalDescriptions[key] || key}</span>
-                        <span class="signal-badge ${value}">${value.toUpperCase()}</span>
+                        <span class="signal-badge ${value}">${safeUpper(value)}</span>
                     </div>
                 `;
             }
@@ -1315,7 +1309,7 @@ function setConnection(connected, message) {
             const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
             const indicators = market.indicators || {};
             const signals = marketData.prediction?.signals || {};
-            const cprBasis = market.cpr?.basis || 'Daily';
+            const cprBasis = safeText(market.cpr?.basis, 'Daily');
             
             let html = '';
             
@@ -1332,7 +1326,7 @@ function setConnection(connected, message) {
                     <div class="indicator-card">
                         <div class="indicator-label">RSI (14)</div>
                         <div class="indicator-value">${indicators.rsi}</div>
-                        <span class="signal-badge ${signals.rsi || 'neutral'}">${(signals.rsi || 'neutral').toUpperCase()}</span>
+                        <span class="signal-badge ${signals.rsi || 'neutral'}">${safeUpper(signals.rsi, 'NEUTRAL')}</span>
                     </div>
                 `;
             }
@@ -1342,7 +1336,7 @@ function setConnection(connected, message) {
                     <div class="indicator-card">
                         <div class="indicator-label">MACD</div>
                         <div class="indicator-value">${indicators.macd}</div>
-                        <span class="signal-badge ${signals.macd || 'neutral'}">${(signals.macd || 'neutral').toUpperCase()}</span>
+                        <span class="signal-badge ${signals.macd || 'neutral'}">${safeUpper(signals.macd, 'NEUTRAL')}</span>
                     </div>
                 `;
             }
@@ -1352,7 +1346,7 @@ function setConnection(connected, message) {
                     <div class="indicator-card">
                         <div class="indicator-label">SMA (20)</div>
                         <div class="indicator-value">₹${indicators.sma_20}</div>
-                        <span class="signal-badge ${signals.sma || 'neutral'}">${(signals.sma || 'neutral').toUpperCase()}</span>
+                        <span class="signal-badge ${signals.sma || 'neutral'}">${safeUpper(signals.sma, 'NEUTRAL')}</span>
                     </div>
                 `;
             }
@@ -1367,12 +1361,12 @@ function setConnection(connected, message) {
                 `;
             }
             
-            if (market.volume) {
+            if (market.volume && typeof market.volume === 'object') {
                 html += `
                     <div class="indicator-card">
                         <div class="indicator-label">Volume</div>
-                        <div class="indicator-value" style="font-size: 15px;">${(market.volume.current_volume / 1000000).toFixed(2)}M</div>
-                        <div style="font-size: 9px; color: #94a3b8; margin-top: 4px;">${market.volume.volume_trend.toUpperCase()}</div>
+                        <div class="indicator-value" style="font-size: 15px;">${Number.isFinite(Number(market.volume.current_volume)) ? (Number(market.volume.current_volume) / 1000000).toFixed(2) + 'M' : '--'}</div>
+                        <div style="font-size: 9px; color: #94a3b8; margin-top: 4px;">${safeUpper(market.volume.volume_trend)}</div>
                     </div>
                 `;
             }
@@ -1382,7 +1376,7 @@ function setConnection(connected, message) {
                     <div class="indicator-card">
                         <div class="indicator-label">Momentum</div>
                         <div class="indicator-value ${indicators.momentum > 0 ? 'bullish-text' : 'bearish-text'}">${indicators.momentum}%</div>
-                        <span class="signal-badge ${signals.momentum || 'neutral'}">${(signals.momentum || 'neutral').toUpperCase()}</span>
+                        <span class="signal-badge ${signals.momentum || 'neutral'}">${safeUpper(signals.momentum, 'NEUTRAL')}</span>
                     </div>
                 `;
             }
@@ -1411,22 +1405,22 @@ function setConnection(connected, message) {
                 container.innerHTML = '<div class="strategy-empty">Strategy signal is unavailable. Check that the updated backend is deployed.</div>';
                 return;
             }
-            const side = String(signal.signal || 'HOLD').toUpperCase();
+            const side = safeUpper(signal.signal, 'HOLD');
             const sideClass = side.toLowerCase();
             const icon = side === 'BUY' ? '🟢' : side === 'SELL' ? '🔴' : '🟡';
             const fmt = v => (v === null || v === undefined || Number.isNaN(Number(v))) ? '--' : '₹' + Number(v).toLocaleString('en-IN', {maximumFractionDigits: 2});
-            const structureTags = (structure?.structure || []).slice(-8).map(x => `<span class="structure-tag">${x.type} · ${fmt(x.price)}</span>`).join('') || `<span class="structure-tag">${String(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span>`;
+            const structureTags = (structure?.structure || []).slice(-8).map(x => `<span class="structure-tag">${x.type} · ${fmt(x.price)}</span>`).join('') || `<span class="structure-tag">${safeUpper(signal.marketStructure || structure?.trend, 'NEUTRAL')}</span>`;
             const reasons = (signal.reasons || []).map(r => `<li>✓ ${r}</li>`).join('') || '<li>Waiting for enough confirmation.</li>';
             const prediction = marketData?.prediction || {};
             container.innerHTML = `
                 <div class="strategy-top">
                     <div>
                         <div class="strategy-title">🎯 ${currentChart === 'nifty' ? 'NIFTY 50' : 'BANK NIFTY'} STRATEGY SIGNAL</div>
-                        <div class="strategy-meta"><span class="strategy-pill">Prediction: ${(prediction.direction || 'neutral').toUpperCase()}</span><span class="strategy-pill">CPR: ${(signal.cprPosition || 'inside').toUpperCase()}</span><span class="strategy-pill">Score: ${signal.score ?? '--'}</span></div>
+                        <div class="strategy-meta"><span class="strategy-pill">Prediction: ${safeUpper(prediction.direction, 'NEUTRAL')}</span><span class="strategy-pill">CPR: ${safeUpper(signal.cprPosition, 'INSIDE')}</span><span class="strategy-pill">Score: ${signal.score ?? '--'}</span></div>
                     </div>
                     <div class="strategy-badge ${sideClass}">${icon} ${side}</div>
                 </div>
-                <div class="strategy-meta"><span class="strategy-pill">Strength: ${(signal.strength || 'weak').toUpperCase()}</span><span class="strategy-pill">Confidence: ${signal.confidence ?? '--'}%</span><span class="strategy-pill">Structure: ${(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span></div>
+                <div class="strategy-meta"><span class="strategy-pill">Strength: ${safeUpper(signal.strength, 'WEAK')}</span><span class="strategy-pill">Confidence: ${signal.confidence ?? '--'}%</span><span class="strategy-pill">Structure: ${safeUpper(signal.marketStructure || structure?.trend, 'NEUTRAL')}</span></div>
                 <div class="strategy-grid">
                     <div class="strategy-value"><span>ENTRY</span><strong>${fmt(signal.entry ?? market.current)}</strong></div>
                     <div class="strategy-value"><span>STOP LOSS</span><strong>${fmt(signal.stopLoss)}</strong></div>
@@ -1440,9 +1434,9 @@ function setConnection(connected, message) {
         function updateChart() {
             const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
             const marketName = currentChart === 'nifty' ? 'Nifty 50' : 'Bank Nifty';
-            const tfLabel = marketData.timeframe_label || currentTimeframe.toUpperCase();
+            const tfLabel = marketData.timeframe_label || safeUpper(currentTimeframe);
             
-            const cprBasis = market.cpr?.basis || 'Daily';
+            const cprBasis = safeText(market.cpr?.basis, 'Daily');
             const cprPeriod = market.cpr?.period_label || 'N/A';
             
             document.getElementById('chartTitle').textContent = `📊 ${marketName} - ${tfLabel}`;
@@ -1491,7 +1485,7 @@ function setConnection(connected, message) {
                 return chartTop + chartHeight - ((price - minPrice) / priceRange) * chartHeight;
             };
             
-            const cprBasis = market.cpr?.basis || 'Daily';
+            const cprBasis = safeText(market.cpr?.basis, 'Daily');
             const cprPeriod = market.cpr?.period_label || 'N/A';
             const srInfo = market.sr_info || {};
             
@@ -1648,7 +1642,7 @@ function setConnection(connected, message) {
             ctx.fillText('- S', isMobile ? 90 : 150, height - 10);
             if (!isMobile) {
                 ctx.fillStyle = 'white';
-                ctx.fillText(`${currentTimeframe.toUpperCase()} | ${data.length} Candles`, 200, height - 10);
+                ctx.fillText(`${safeUpper(currentTimeframe)} | ${data.length} Candles`, 200, height - 10);
             }
         }
 
@@ -1837,47 +1831,6 @@ function normalizeCandles(market){
     return {time:toUnixTime(x.time??x.timestamp??x.datetime??x.date),open:Number(x.open??x.Open),high:Number(x.high??x.High),low:Number(x.low??x.Low),close:Number(x.close??x.Close),volume:Number(x.volume??x.Volume??0)};
   }).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.open)&&Number.isFinite(x.high)&&Number.isFinite(x.low)&&Number.isFinite(x.close)&&!seen.has(x.time)&&(seen.add(x.time),true)).sort((a,b)=>a.time-b.time);
 }
-
-function normalizeMarketForChart(market){
-  if(!market || typeof market!=='object') return null;
-
-  const raw=market.candleData||market.candles||market.candlestickData||market.chartData||market.ohlcv||[];
-  if(!Array.isArray(raw)) return {...market,candleData:[]};
-
-  const out=raw.map((x,i)=>{
-    if(Array.isArray(x)){
-      return {
-        time:toUnixTime(x[0]) ?? (i+1),
-        open:Number(x[1]), high:Number(x[2]), low:Number(x[3]),
-        close:Number(x[4]), volume:Number(x[5]||0)
-      };
-    }
-    return {
-      time:toUnixTime(x.time??x.timestamp??x.datetime??x.date) ?? (i+1),
-      open:Number(x.open??x.Open),
-      high:Number(x.high??x.High),
-      low:Number(x.low??x.Low),
-      close:Number(x.close??x.Close),
-      volume:Number(x.volume??x.Volume??0)
-    };
-  }).filter(c =>
-    Number.isFinite(c.time) &&
-    Number.isFinite(c.open) &&
-    Number.isFinite(c.high) &&
-    Number.isFinite(c.low) &&
-    Number.isFinite(c.close)
-  ).sort((a,b)=>a.time-b.time);
-
-  const seen=new Set();
-  const unique=out.filter(c=>{
-    if(seen.has(c.time)) return false;
-    seen.add(c.time);
-    return true;
-  });
-
-  return {...market,candleData:unique};
-}
-
 function renderProfessionalChart(market,name){
   market=normalizeMarketForChart(market);
   if(!market) return;
@@ -1931,7 +1884,7 @@ function renderProfessionalChart(market,name){
   })).filter(x=>Number.isFinite(x.time));
 
   const sig=market.tradeSignal||market.signal||{};
-  const signal=String(sig.signal||sig.direction||'HOLD').toUpperCase();
+  const signal=safeUpper(sig.signal||sig.direction, 'HOLD');
 
   // Find the current/entry candle. Backend can optionally return signalTime/entryTime.
   let signalTime=toUnixTime(sig.signalTime??sig.entryTime??sig.timestamp);
