@@ -308,111 +308,65 @@ def fetch_market_data(symbol, timeframe='15m'):
     return None
 
 
-MIN_STRUCTURE_CANDLES = 21
-STRUCTURE_LOOKBACK = 120
-LEFT_SWING_BARS = 10
-RIGHT_SWING_BARS = 10
-MAX_STRUCTURE_MARKERS = 8
-MARKER_MIN_GAP_CANDLES = 10
+MIN_STRUCTURE_CANDLES = 20
 
-def detect_market_structure(
-    data,
-    lookback=STRUCTURE_LOOKBACK,
-    left_bars=LEFT_SWING_BARS,
-    right_bars=RIGHT_SWING_BARS,
-    max_markers=MAX_STRUCTURE_MARKERS,
-    min_gap=MARKER_MIN_GAP_CANDLES
-):
+def detect_market_structure(data, lookback=100, swing=2, min_candles=MIN_STRUCTURE_CANDLES):
     """
-    Confirm swings with 10 candles on the left and 10 candles on the right.
-    Minimum required candles: 10 + pivot + 10 = 21.
-
-    A swing high is confirmed only after the right-side 10 candles exist.
-    A swing low is confirmed only after the right-side 10 candles exist.
+    Confirm HH/HL/LH/LL using at least 20 completed candles.
+    A pivot is confirmed only after `swing` candles have formed to its right.
     """
-    minimum_candles = left_bars + right_bars + 1
     empty = {
-        "valid": False,
-        "minimumCandles": minimum_candles,
-        "candlesRequired": minimum_candles,
-        "candlesAnalyzed": 0,
-        "completedCandles": 0,
-        "enoughCandles": False,
-        "leftBars": left_bars,
-        "rightBars": right_bars,
-        "trend": "neutral",
-        "structure": [],
-        "swingHighs": [],
-        "swingLows": [],
-        "lastHighType": None,
-        "lastLowType": None,
-        "lastHH": None,
-        "lastHL": None,
-        "lastLH": None,
-        "lastLL": None,
-        "counts": {"HH": 0, "HL": 0, "LH": 0, "LL": 0},
-        "score": 0
+        "valid": False, "minimumCandles": min_candles, "candlesAnalyzed": 0,
+        "trend": "neutral", "structure": [], "swingHighs": [], "swingLows": [],
+        "lastHighType": None, "lastLowType": None, "score": 0
     }
-
-    if data is None:
+    if data is None or len(data) < min_candles:
+        empty["candlesAnalyzed"] = 0 if data is None else len(data)
         return empty
 
-    d = data.dropna(subset=["Open", "High", "Low", "Close"]).copy()
-    if len(d) < minimum_candles:
-        empty["candlesAnalyzed"] = len(d)
-        empty["completedCandles"] = len(d)
-        return empty
-
-    d = d.tail(max(lookback, minimum_candles)).copy()
+    d = data.tail(max(min_candles, lookback)).copy()
     highs, lows = [], []
 
-    for i in range(left_bars, len(d) - right_bars):
-        high, low = float(d["High"].iloc[i]), float(d["Low"].iloc[i])
+    for i in range(swing, len(d) - swing):
+        h = float(d["High"].iloc[i])
+        l = float(d["Low"].iloc[i])
+        hwin = d["High"].iloc[i-swing:i+swing+1]
+        lwin = d["Low"].iloc[i-swing:i+swing+1]
 
-        lh = d["High"].iloc[i-left_bars:i]
-        rh = d["High"].iloc[i+1:i+1+right_bars]
-        ll = d["Low"].iloc[i-left_bars:i]
-        rl = d["Low"].iloc[i+1:i+1+right_bars]
-
-        is_high = high > float(lh.max()) and high >= float(rh.max())
-        is_low = low < float(ll.min()) and low <= float(rl.min())
-
-        if is_high:
-            if not highs or i - highs[-1][0] >= min_gap:
-                highs.append((i, high))
-            elif high > highs[-1][1]:
-                highs[-1] = (i, high)
-
-        if is_low:
-            if not lows or i - lows[-1][0] >= min_gap:
-                lows.append((i, low))
-            elif low < lows[-1][1]:
-                lows[-1] = (i, low)
+        if h == float(hwin.max()) and h > float(d["High"].iloc[i-1]):
+            highs.append((i, h))
+        if l == float(lwin.min()) and l < float(d["Low"].iloc[i-1]):
+            lows.append((i, l))
 
     swing_highs, swing_lows = [], []
-
-    for pos, (i, price) in enumerate(highs):
-        typ = "SH" if pos == 0 else ("HH" if price > highs[pos-1][1] else "LH")
+    for n, (i, price) in enumerate(highs):
+        if n == 0:
+            typ = "SH"
+        else:
+            typ = "HH" if price > highs[n-1][1] else "LH"
         swing_highs.append({
-            "index": int(i), "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
-            "price": round(float(price), 2), "type": typ, "confirmed": True,
-            "leftBars": left_bars, "rightBars": right_bars,
-            "candlesAgo": int(len(d)-1-i)
+            "index": int(i),
+            "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
+            "price": round(price, 2),
+            "type": typ,
+            "confirmed": True
         })
 
-    for pos, (i, price) in enumerate(lows):
-        typ = "SL" if pos == 0 else ("HL" if price > lows[pos-1][1] else "LL")
+    for n, (i, price) in enumerate(lows):
+        if n == 0:
+            typ = "SL"
+        else:
+            typ = "HL" if price > lows[n-1][1] else "LL"
         swing_lows.append({
-            "index": int(i), "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
-            "price": round(float(price), 2), "type": typ, "confirmed": True,
-            "leftBars": left_bars, "rightBars": right_bars,
-            "candlesAgo": int(len(d)-1-i)
+            "index": int(i),
+            "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
+            "price": round(price, 2),
+            "type": typ,
+            "confirmed": True
         })
 
-    ch = [x for x in swing_highs if x["type"] in ("HH", "LH")]
-    cl = [x for x in swing_lows if x["type"] in ("HL", "LL")]
-    last_high = ch[-1]["type"] if ch else None
-    last_low = cl[-1]["type"] if cl else None
+    last_high = swing_highs[-1]["type"] if swing_highs else None
+    last_low = swing_lows[-1]["type"] if swing_lows else None
 
     if last_high == "HH" and last_low == "HL":
         trend, score = "bullish", 2
@@ -421,210 +375,24 @@ def detect_market_structure(
     else:
         trend, score = "neutral", 0
 
-    structure = sorted(ch + cl, key=lambda x: x["index"])[-max_markers:]
+    structure = sorted(
+        [x for x in swing_highs + swing_lows if x["type"] in ("HH", "HL", "LH", "LL")],
+        key=lambda x: x["index"]
+    )[-20:]
 
     return {
         "valid": True,
-        "minimumCandles": minimum_candles,
-        "candlesRequired": minimum_candles,
+        "minimumCandles": min_candles,
         "candlesAnalyzed": len(d),
-        "completedCandles": len(d),
-        "enoughCandles": True,
-        "leftBars": left_bars, "rightBars": right_bars,
         "trend": trend,
         "structure": structure,
-        "swingHighs": swing_highs[-8:],
-        "swingLows": swing_lows[-8:],
-        "lastHighType": last_high, "lastLowType": last_low,
-        "lastHH": next((x for x in reversed(ch) if x["type"] == "HH"), None),
-        "lastHL": next((x for x in reversed(cl) if x["type"] == "HL"), None),
-        "lastLH": next((x for x in reversed(ch) if x["type"] == "LH"), None),
-        "lastLL": next((x for x in reversed(cl) if x["type"] == "LL"), None),
-        "counts": {
-            "HH": sum(x["type"] == "HH" for x in swing_highs),
-            "HL": sum(x["type"] == "HL" for x in swing_lows),
-            "LH": sum(x["type"] == "LH" for x in swing_highs),
-            "LL": sum(x["type"] == "LL" for x in swing_lows)
-        },
+        "swingHighs": swing_highs[-10:],
+        "swingLows": swing_lows[-10:],
+        "lastHighType": last_high,
+        "lastLowType": last_low,
         "score": score
     }
 
-
-def calculate_global_market_bias(global_markets):
-    """Build morning bias from the returned global indices."""
-    if not global_markets:
-        return {"bias": "neutral", "score": 0, "positive": 0, "negative": 0, "total": 0}
-
-    items = []
-    if isinstance(global_markets, dict):
-        for region, values in global_markets.items():
-            if isinstance(values, list):
-                items.extend(values)
-    elif isinstance(global_markets, list):
-        items = global_markets
-
-    positive = negative = 0
-    for item in items:
-        change = item.get("change", item.get("changePercent", 0)) if isinstance(item, dict) else 0
-        try:
-            change = float(change)
-        except (TypeError, ValueError):
-            change = 0
-        if change > 0:
-            positive += 1
-        elif change < 0:
-            negative += 1
-
-    total = positive + negative
-    score = positive - negative
-    if score >= 2:
-        bias = "bullish"
-    elif score <= -2:
-        bias = "bearish"
-    else:
-        bias = "neutral"
-
-    return {"bias": bias, "score": score, "positive": positive, "negative": negative, "total": total}
-
-
-def generate_trade_signal_v2(data, structure, cpr, global_markets=None):
-    """
-    BUY:
-      1. Morning global market bias bullish, AND
-      2. Price is near/above CPR TC, OR
-      3. Current/next candle closes above the confirmed HL candle high.
-
-    SELL:
-      1. Morning global market bias bearish, AND
-      2. Price is near/below CPR BC, OR
-      3. Current/next candle closes below the confirmed LH candle low.
-
-    HOLD when conditions do not align.
-
-    Stop-loss and target always use minimum risk:reward of 1:2.
-    """
-    result = {
-        "signal": "HOLD", "entry": None, "stopLoss": None, "target": None,
-        "riskReward": 0, "reason": "Conditions not aligned", "confidence": 0
-    }
-
-    if data is None or len(data) < MIN_STRUCTURE_CANDLES:
-        result["reason"] = "Waiting for minimum 21 candles"
-        return result
-
-    df = data.dropna(subset=["Open", "High", "Low", "Close"]).copy()
-    if len(df) < MIN_STRUCTURE_CANDLES:
-        result["reason"] = "Waiting for valid candles"
-        return result
-
-    latest = df.iloc[-1]
-    previous = df.iloc[-2]
-    close = float(latest["Close"])
-    atr = float((df["High"] - df["Low"]).tail(14).mean())
-    if not atr or atr <= 0:
-        atr = max(close * 0.002, 1.0)
-
-    bias_info = calculate_global_market_bias(global_markets)
-    bias = bias_info["bias"]
-
-    # CPR values can be dicts or scalar values.
-    def cpr_value(keys):
-        if not isinstance(cpr, dict):
-            return None
-        for key in keys:
-            value = cpr.get(key)
-            if isinstance(value, dict):
-                value = value.get("value", value.get("price"))
-            try:
-                if value is not None:
-                    return float(value)
-            except (TypeError, ValueError):
-                pass
-        return None
-
-    tc = cpr_value(["tc", "TC", "topCentral", "top"])
-    bc = cpr_value(["bc", "BC", "bottomCentral", "bottom"])
-
-    near_distance = max(atr * 0.35, close * 0.0015)
-    near_tc = tc is not None and abs(close - tc) <= near_distance
-    near_bc = bc is not None and abs(close - bc) <= near_distance
-    above_tc = tc is not None and close >= tc
-    below_bc = bc is not None and close <= bc
-
-    last_hl = structure.get("lastHL") if isinstance(structure, dict) else None
-    last_lh = structure.get("lastLH") if isinstance(structure, dict) else None
-
-    hl_breakout = False
-    lh_breakdown = False
-
-    if last_hl and last_hl.get("index") is not None:
-        idx = int(last_hl["index"])
-        if 0 <= idx < len(df):
-            hl_high = float(df["High"].iloc[idx])
-            hl_breakout = close > hl_high and float(previous["Close"]) <= hl_high
-
-    if last_lh and last_lh.get("index") is not None:
-        idx = int(last_lh["index"])
-        if 0 <= idx < len(df):
-            lh_low = float(df["Low"].iloc[idx])
-            lh_breakdown = close < lh_low and float(previous["Close"]) >= lh_low
-
-    bullish_structure = structure.get("trend") == "bullish" if isinstance(structure, dict) else False
-    bearish_structure = structure.get("trend") == "bearish" if isinstance(structure, dict) else False
-
-    # BUY: global bias + bullish structure + CPR TC location or HL breakout.
-    buy_setup = bias == "bullish" and bullish_structure and (near_tc or above_tc or hl_breakout)
-
-    # SELL: global bias + bearish structure + CPR BC location or LH breakdown.
-    sell_setup = bias == "bearish" and bearish_structure and (near_bc or below_bc or lh_breakdown)
-
-    if buy_setup:
-        entry = close
-        candidate_sl = float(last_hl["price"]) if last_hl else entry - atr
-        stop = min(candidate_sl - atr * 0.10, entry - atr * 0.75)
-        risk = entry - stop
-        target = entry + risk * 2.0
-        result.update({
-            "signal": "BUY", "entry": round(entry, 2), "stopLoss": round(stop, 2),
-            "target": round(target, 2), "riskReward": 2.0,
-            "confidence": 80 if hl_breakout else 72,
-            "reason": "Bullish global bias + HH/HL structure + " +
-                      ("HL breakout" if hl_breakout else "near/above CPR TC")
-        })
-
-    elif sell_setup:
-        entry = close
-        candidate_sl = float(last_lh["price"]) if last_lh else entry + atr
-        stop = max(candidate_sl + atr * 0.10, entry + atr * 0.75)
-        risk = stop - entry
-        target = entry - risk * 2.0
-        result.update({
-            "signal": "SELL", "entry": round(entry, 2), "stopLoss": round(stop, 2),
-            "target": round(target, 2), "riskReward": 2.0,
-            "confidence": 80 if lh_breakdown else 72,
-            "reason": "Bearish global bias + LH/LL structure + " +
-                      ("LH breakdown" if lh_breakdown else "near/below CPR BC")
-        })
-    else:
-        result["reason"] = (
-            f"HOLD: global bias={bias}; "
-            f"structure={structure.get('trend', 'neutral') if isinstance(structure, dict) else 'neutral'}; "
-            f"waiting for CPR or structure breakout confirmation"
-        )
-
-    result["globalBias"] = bias_info
-    result["conditions"] = {
-        "nearTC": near_tc, "aboveTC": above_tc,
-        "nearBC": near_bc, "belowBC": below_bc,
-        "hlBreakout": hl_breakout, "lhBreakdown": lh_breakdown
-    }
-    return result
-
-
-
-# Compatibility wrapper: existing processing code can keep calling generate_trade_signal.
-def generate_trade_signal(data, structure, cpr, global_markets=None, *args, **kwargs):
-    return generate_trade_signal_v2(data, structure, cpr, global_markets)
 
 def _unique_zone_levels(points, current_price, side, tolerance):
     values = sorted([float(x["price"]) for x in points])
@@ -664,97 +432,195 @@ def calculate_structure_sr(data, structure):
     )
 
 
-def generate_trade_signal(data, prediction, cpr, support, resistance, structure):
+def generate_trade_signal(data, prediction, cpr, support, resistance, market_structure):
     """
-    Strict confluence strategy:
-      minimum 20 candles + confirmed HH/HL/LH/LL + prediction + CPR +
-      market-structure support/resistance + candle confirmation.
+    Select higher-quality entry areas and only return BUY/SELL when the setup
+    has a realistic minimum reward:risk of 1:2.
+
+    Priority:
+      BUY  -> bullish prediction + HH/HL + entry near TC/support or HL breakout.
+      SELL -> bearish prediction + LH/LL + entry near BC/resistance or LH breakdown.
+
+    Target selection prefers real market levels beyond 2R. If no valid level
+    exists, the signal is HOLD rather than publishing a misleading target.
     """
-    if data is None or len(data) < MIN_STRUCTURE_CANDLES:
-        return {
-            "signal": "HOLD", "strength": "weak", "confidence": 0, "score": 0,
-            "entry": None, "stopLoss": None, "target": None,
-            "marketStructure": "neutral",
-            "reasons": [f"Waiting for at least {MIN_STRUCTURE_CANDLES} candles"],
-            "conditions": {}
-        }
-
-    prediction = prediction or {"direction": "neutral", "confidence": 0}
-    price = float(data["Close"].iloc[-1])
-    trend = structure.get("trend", "neutral")
-    direction = prediction.get("direction", "neutral")
-    bc, tc = float(cpr.get("bc", 0)), float(cpr.get("tc", 0))
-    cpr_low, cpr_high = min(bc, tc), max(bc, tc)
-
-    bullish_candle = float(data["Close"].iloc[-1]) > float(data["Open"].iloc[-1])
-    bearish_candle = float(data["Close"].iloc[-1]) < float(data["Open"].iloc[-1])
-
-    structure_ok_buy = trend == "bullish"
-    structure_ok_sell = trend == "bearish"
-    prediction_buy = direction == "bullish"
-    prediction_sell = direction == "bearish"
-    cpr_buy = cpr_high > 0 and price > cpr_high
-    cpr_sell = cpr_high > 0 and price < cpr_low
-
-    structure_support = [x for x in support if x.get("level", "").startswith("MS-S")]
-    structure_resistance = [x for x in resistance if x.get("level", "").startswith("MS-R")]
-    nearest_support = max(structure_support, key=lambda x: x["value"], default=None)
-    nearest_resistance = min(structure_resistance, key=lambda x: x["value"], default=None)
-
-    buy_score = sum([prediction_buy * 2, structure_ok_buy * 3, cpr_buy * 2, bullish_candle * 1])
-    sell_score = sum([prediction_sell * 2, structure_ok_sell * 3, cpr_sell * 2, bearish_candle * 1])
-
-    # Require structure + prediction + CPR alignment. Candle adds confirmation.
-    if structure_ok_buy and prediction_buy and cpr_buy and buy_score >= 7:
-        signal, score = "BUY", buy_score
-    elif structure_ok_sell and prediction_sell and cpr_sell and sell_score >= 7:
-        signal, score = "SELL", -sell_score
-    else:
-        signal, score = "HOLD", 0
-
-    recent_range = float((data["High"].tail(14) - data["Low"].tail(14)).mean())
-    risk_buffer = max(recent_range * 0.6, price * 0.002)
-
-    if signal == "BUY":
-        stop = (nearest_support["value"] - risk_buffer) if nearest_support else price - risk_buffer
-        target = nearest_resistance["value"] if nearest_resistance else price + risk_buffer * 2
-    elif signal == "SELL":
-        stop = (nearest_resistance["value"] + risk_buffer) if nearest_resistance else price + risk_buffer
-        target = nearest_support["value"] if nearest_support else price - risk_buffer * 2
-    else:
-        stop = target = None
-
-    reasons = []
-    if prediction_buy or prediction_sell: reasons.append(f"Prediction: {direction}")
-    if trend != "neutral": reasons.append(f"Structure confirmed: {trend} ({structure.get('lastHighType')} + {structure.get('lastLowType')})")
-    if cpr_buy: reasons.append("Price above CPR")
-    elif cpr_sell: reasons.append("Price below CPR")
-    else: reasons.append("Price inside/near CPR")
-    if bullish_candle: reasons.append("Latest candle bullish")
-    elif bearish_candle: reasons.append("Latest candle bearish")
-
-    confidence = min(95, 50 + abs(score) * 5) if signal != "HOLD" else 35
-
-    return {
-        "signal": signal,
-        "strength": "strong" if abs(score) >= 8 else "moderate" if abs(score) >= 7 else "weak",
-        "confidence": round(confidence, 1),
-        "score": score,
-        "entry": round(price, 2),
-        "stopLoss": round(stop, 2) if stop is not None else None,
-        "target": round(target, 2) if target is not None else None,
-        "nearestSupport": nearest_support,
-        "nearestResistance": nearest_resistance,
-        "marketStructure": trend,
-        "reasons": reasons,
-        "conditions": {
-            "minimum20Candles": structure.get("valid", False),
-            "prediction": direction,
-            "structure": trend,
-            "cprPosition": "above" if cpr_buy else "below" if cpr_sell else "inside",
-            "candle": "bullish" if bullish_candle else "bearish" if bearish_candle else "doji"
-        }
+    hold = {
+        "signal": "HOLD", "entry": None, "stopLoss": None, "target": None,
+        "riskReward": 0, "confidence": 0,
+        "reason": "Waiting for aligned prediction, structure, entry and reward"
     }
+
+    if data is None or len(data) < 21:
+        hold["reason"] = "Waiting for at least 21 candles"
+        return hold
+
+    df = data.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+    if len(df) < 21:
+        hold["reason"] = "Insufficient valid candles"
+        return hold
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    entry = float(last["Close"])
+    prediction = prediction or {}
+    direction = str(prediction.get("direction", prediction.get("prediction", "neutral"))).lower()
+    confidence = float(prediction.get("confidence", 50) or 50)
+
+    structure = market_structure or {}
+    trend = str(structure.get("trend", "neutral")).lower()
+    last_hl = structure.get("lastHL")
+    last_lh = structure.get("lastLH")
+
+    # ATR-like volatility buffer used only to place stops beyond structure.
+    ranges = (df["High"] - df["Low"]).tail(min(14, len(df)))
+    atr = float(ranges.mean()) if len(ranges) else 0.0
+    atr = max(atr, entry * 0.0008, 1.0)
+
+    def values(levels):
+        out = []
+        for x in levels or []:
+            if isinstance(x, dict):
+                x = x.get("value", x.get("price", x.get("level")))
+            try:
+                v = float(x)
+                if v > 0:
+                    out.append(v)
+            except (TypeError, ValueError):
+                pass
+        return sorted(set(out))
+
+    support_levels = values(support)
+    resistance_levels = values(resistance)
+
+    def cpr_num(key):
+        try:
+            return float(cpr.get(key))
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    tc, pivot, bc = cpr_num("tc"), cpr_num("pivot"), cpr_num("bc")
+    proximity = max(atr * 0.40, entry * 0.0010)
+
+    # Confirm structure breakouts against the actual pivot candle.
+    hl_breakout = False
+    lh_breakdown = False
+    hl_price = lh_price = None
+
+    if isinstance(last_hl, dict):
+        try:
+            hl_idx = int(last_hl.get("index"))
+            if 0 <= hl_idx < len(df):
+                hl_high = float(df["High"].iloc[hl_idx])
+                hl_price = float(last_hl.get("price", df["Low"].iloc[hl_idx]))
+                hl_breakout = entry > hl_high and float(prev["Close"]) <= hl_high
+        except (TypeError, ValueError, IndexError):
+            pass
+
+    if isinstance(last_lh, dict):
+        try:
+            lh_idx = int(last_lh.get("index"))
+            if 0 <= lh_idx < len(df):
+                lh_low = float(df["Low"].iloc[lh_idx])
+                lh_price = float(last_lh.get("price", df["High"].iloc[lh_idx]))
+                lh_breakdown = entry < lh_low and float(prev["Close"]) >= lh_low
+        except (TypeError, ValueError, IndexError):
+            pass
+
+    near_tc = tc is not None and abs(entry - tc) <= proximity
+    near_bc = bc is not None and abs(entry - bc) <= proximity
+    bullish_cpr = tc is not None and entry >= tc - proximity
+    bearish_cpr = bc is not None and entry <= bc + proximity
+
+    bullish = direction in ("bullish", "buy", "up") and trend == "bullish"
+    bearish = direction in ("bearish", "sell", "down") and trend == "bearish"
+
+    # Choose an entry area, then derive stop first. Target is always derived
+    # from the final stop distance and then upgraded to the next real level.
+    if bullish and (near_tc or bullish_cpr or hl_breakout):
+        entry_reason = "HL breakout" if hl_breakout else "near/above CPR TC"
+
+        # Stop below HL first; otherwise below nearest valid support.
+        stop_candidates = [v for v in support_levels if v < entry]
+        if hl_price is not None and hl_price < entry:
+            stop_candidates.append(hl_price)
+        structural_stop = max(stop_candidates) if stop_candidates else entry - atr * 1.2
+        stop = min(structural_stop - atr * 0.15, entry - atr * 0.60)
+
+        risk = entry - stop
+        if risk <= 0:
+            return hold
+
+        min_target = entry + risk * 2.0
+        higher_resistance = [v for v in resistance_levels if v >= min_target]
+        # Prefer the nearest genuine resistance that still gives >=2R.
+        target = higher_resistance[0] if higher_resistance else entry + risk * 2.0
+        rr = (target - entry) / risk
+
+        if rr < 2.0:
+            return hold
+
+        setup_bonus = 10 if hl_breakout else 5
+        return {
+            "signal": "BUY",
+            "entry": round(entry, 2),
+            "stopLoss": round(stop, 2),
+            "target": round(target, 2),
+            "risk": round(risk, 2),
+            "reward": round(target - entry, 2),
+            "riskReward": round(rr, 2),
+            "confidence": round(min(95, confidence + setup_bonus), 1),
+            "reason": f"Bullish prediction + HH/HL + {entry_reason}; target selected at >= 1:{round(rr,2)}",
+            "entryZone": "CPR TC / HL confirmation",
+            "conditions": {
+                "prediction": direction, "structure": trend,
+                "nearTC": near_tc, "hlBreakout": hl_breakout
+            }
+        }
+
+    if bearish and (near_bc or bearish_cpr or lh_breakdown):
+        entry_reason = "LH breakdown" if lh_breakdown else "near/below CPR BC"
+
+        # Stop above LH first; otherwise above nearest valid resistance.
+        stop_candidates = [v for v in resistance_levels if v > entry]
+        if lh_price is not None and lh_price > entry:
+            stop_candidates.append(lh_price)
+        structural_stop = min(stop_candidates) if stop_candidates else entry + atr * 1.2
+        stop = max(structural_stop + atr * 0.15, entry + atr * 0.60)
+
+        risk = stop - entry
+        if risk <= 0:
+            return hold
+
+        min_target = entry - risk * 2.0
+        lower_support = sorted([v for v in support_levels if v <= min_target], reverse=True)
+        # Prefer nearest genuine support that still gives >=2R.
+        target = lower_support[0] if lower_support else entry - risk * 2.0
+        rr = (entry - target) / risk
+
+        if rr < 2.0:
+            return hold
+
+        setup_bonus = 10 if lh_breakdown else 5
+        return {
+            "signal": "SELL",
+            "entry": round(entry, 2),
+            "stopLoss": round(stop, 2),
+            "target": round(target, 2),
+            "risk": round(risk, 2),
+            "reward": round(entry - target, 2),
+            "riskReward": round(rr, 2),
+            "confidence": round(min(95, confidence + setup_bonus), 1),
+            "reason": f"Bearish prediction + LH/LL + {entry_reason}; target selected at >= 1:{round(rr,2)}",
+            "entryZone": "CPR BC / LH confirmation",
+            "conditions": {
+                "prediction": direction, "structure": trend,
+                "nearBC": near_bc, "lhBreakdown": lh_breakdown
+            }
+        }
+
+    hold["confidence"] = round(confidence, 1)
+    hold["reason"] = f"HOLD: prediction={direction}, structure={trend}; waiting for high-quality entry near CPR or confirmed breakout"
+    return hold
 
 def generate_candlestick_data(data, max_candles=150):
     """Chart-ready OHLCV data. Frontend can render candles, volume and overlays."""
@@ -913,51 +779,6 @@ def predict_market_direction(nifty_data, global_markets, indicators):
         'signals': signals,
         'global_positive_ratio': float(round(global_ratio * 100, 1))
     }
-
-
-def calculate_volume_analysis(data, lookback=20):
-    """Safe volume analysis for Yahoo Finance OHLCV data."""
-    default = {
-        "current_volume": 0,
-        "avg_volume": 0,
-        "volume_ratio": 1.0,
-        "volume_trend": "neutral",
-        "volume_signal": "normal"
-    }
-    try:
-        if data is None or data.empty or "Volume" not in data.columns:
-            return default
-
-        volume = pd.to_numeric(data["Volume"], errors="coerce").fillna(0.0)
-        current_volume = float(volume.iloc[-1])
-        history = volume.iloc[max(0, len(volume)-lookback-1):-1]
-        if history.empty:
-            history = volume.iloc[:-1]
-        avg_volume = float(history.mean()) if not history.empty else current_volume
-
-        if avg_volume <= 0:
-            ratio = 1.0
-        else:
-            ratio = current_volume / avg_volume
-
-        recent = volume.tail(min(5, len(volume))).mean()
-        previous = volume.iloc[max(0, len(volume)-10):max(0, len(volume)-5)].mean()
-        if previous and previous > 0:
-            trend = "increasing" if recent > previous * 1.05 else "decreasing" if recent < previous * 0.95 else "neutral"
-        else:
-            trend = "neutral"
-
-        signal = "high" if ratio >= 1.5 else "low" if ratio <= 0.6 else "normal"
-        return {
-            "current_volume": int(round(current_volume)),
-            "avg_volume": int(round(avg_volume)),
-            "volume_ratio": round(float(ratio), 2),
-            "volume_trend": trend,
-            "volume_signal": signal
-        }
-    except Exception as e:
-        logger.warning("Volume analysis failed: %s", e)
-        return default
 
 def process_market_data(symbol, timeframe='15m', prediction=None, data=None):
     try:
