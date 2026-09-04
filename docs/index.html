@@ -736,7 +736,7 @@
         @media (max-width:600px){ .strategy-card{padding:13px}.strategy-grid{grid-template-columns:1fr 1fr}.strategy-value:last-child{grid-column:span 2}.strategy-badge{font-size:19px;padding:7px 12px} }
 
     </style>
-<script src="https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 #proChartPanel{background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.18);padding:12px;border-radius:14px}
 #tradingChart{background:#0f172a}
@@ -747,11 +747,6 @@
 <style id="strategy-signal-chart-style">
 .strategy-buy{color:#00c853;font-weight:800}.strategy-sell{color:#ff1744;font-weight:800}.strategy-hold{color:#f59e0b;font-weight:800}
 </style>
-
-<style id="frontend-runtime-fix">
-.strategy-empty{white-space:normal}
-</style>
-
 </head>
 <body>
     <div class="loading-overlay" id="loadingOverlay">
@@ -941,11 +936,17 @@
         // API URL - Configurable for deployment
         // Change this to your deployed backend URL (e.g., Render, Railway)
         const DEFAULT_RENDER_URL = "https://indian-market-predictor-api.onrender.com";
-let API_BASE_URL = localStorage.getItem('apiBaseUrl') || (
-    ['localhost','127.0.0.1'].includes(window.location.hostname)
-        ? 'http://127.0.0.1:5000'
-        : DEFAULT_RENDER_URL
-);
+const STORED_API_URL = localStorage.getItem('apiBaseUrl');
+let API_BASE_URL =
+    STORED_API_URL &&
+    STORED_API_URL !== 'undefined' &&
+    STORED_API_URL !== 'null'
+        ? normalizeApiBase(STORED_API_URL)
+        : (
+            ['localhost','127.0.0.1'].includes(window.location.hostname)
+                ? 'http://127.0.0.1:5000'
+                : DEFAULT_RENDER_URL
+        );
 
 function normalizeApiBase(url) {
     return String(url || '').trim().replace(/\/$/, '').replace(/\/api\/market-data$/, '');
@@ -963,12 +964,7 @@ function setConnection(connected, message) {
     if (!connected && statusIndicator) statusIndicator.classList.add('error');
     if (connectionStatus) connectionStatus.textContent = message || (connected ? 'Connected' : 'Offline');
 }
-        
-        function getApiUrl() {
-            return `${API_BASE_URL}/api/market-data`;
-        }
-
-        // Mobile menu
+// Mobile menu
         function toggleMobileMenu() {
             document.getElementById('sidebar').classList.toggle('open');
             document.getElementById('mobileOverlay').classList.toggle('show');
@@ -999,7 +995,7 @@ function setConnection(connected, message) {
 
         // Change timeframe
         function changeTimeframe(tf) {
-            currentTimeframe = tf;
+            currentTimeframe = safeString(tf, '15m');
             
             document.querySelectorAll('.timeframe-btn').forEach(btn => {
                 btn.classList.remove('active');
@@ -1099,7 +1095,7 @@ function setConnection(connected, message) {
                 if (!Array.isArray(obj)) continue;
                 for (const item of obj) {
                     if (!item || typeof item !== 'object') continue;
-                    const id = safeUpper(item.symbol || item.name || item.market || item.key || item.id || '');
+                    const id = String(item.symbol || item.name || item.market || item.key || item.id || '').toUpperCase();
                     if (!nifty && id.includes('NIFTY') && !id.includes('BANK')) nifty = item;
                     if (!bankNifty && (id.includes('BANKNIFTY') || id.includes('NIFTYBANK') || (id.includes('BANK') && id.includes('NIFTY')))) bankNifty = item;
                 }
@@ -1123,13 +1119,12 @@ function setConnection(connected, message) {
 
 
         function safeUpper(value, fallback = '--') {
-            if (value === undefined || value === null) return fallback;
+            if (value === undefined || value === null || value === '') return fallback;
             return String(value).toUpperCase();
         }
-        function safeText(value, fallback = '--') {
+        function safeString(value, fallback = '--') {
             return (value === undefined || value === null || value === '') ? fallback : String(value);
         }
-
         async function fetchMarketData() {
             const loadingOverlay = document.getElementById('loadingOverlay');
             const loadingStatus = document.getElementById('loadingStatus');
@@ -1143,7 +1138,11 @@ function setConnection(connected, message) {
             const timeout = setTimeout(() => controller.abort(), 20000);
 
             try {
-                const url = `${getApiUrl()}?timeframe=${encodeURIComponent(currentTimeframe)}&_=${Date.now()}`;
+                const apiUrl = getApiUrl();
+                if (!apiUrl || /undefined|null/.test(apiUrl)) {
+                    throw new Error('Backend URL is not configured. Please enter the Render backend URL.');
+                }
+                const url = `${apiUrl}?timeframe=${encodeURIComponent(currentTimeframe)}&_=${Date.now()}`;
                 const response = await fetch(url, {
                     method: 'GET',
                     mode: 'cors',
@@ -1162,8 +1161,13 @@ function setConnection(connected, message) {
                 // Support both direct and wrapped backend payloads.
                 marketData = normalizeBackendPayload(payload);
 
-                setConnection(true, 'Connected');
-                document.getElementById('configBanner')?.classList.remove('show');
+                const hasIndianMarket =
+                    !!marketData.nifty || !!marketData.bankNifty || !!marketData.banknifty;
+
+                setConnection(true, hasIndianMarket ? 'Connected' : 'Connected • Indian market data unavailable');
+                if (hasIndianMarket) {
+                    document.getElementById('configBanner')?.classList.remove('show');
+                }
 
                 updateUI();
 
@@ -1183,10 +1187,9 @@ function setConnection(connected, message) {
                 if (loadingStatus) loadingStatus.textContent = 'Market data updated';
             } catch (error) {
                 console.error('Market API error:', error);
-                const message = error && error.message ? error.message : String(error || 'Unknown error');
-                setConnection(false, `Offline: ${message}`);
+                setConnection(false, `Offline: ${error.message}`);
                 document.getElementById('configBanner')?.classList.add('show');
-                if (loadingStatus) loadingStatus.textContent = message;
+                if (loadingStatus) loadingStatus.textContent = error.message;
             } finally {
                 clearTimeout(timeout);
                 if (refreshBtn) refreshBtn.disabled = false;
@@ -1198,12 +1201,22 @@ function setConnection(connected, message) {
         function updateUI() {
             if (!marketData) return;
             
-            updatePriceCards();
-            updatePrediction();
-            updateGlobalMarkets();
-            updateIndicators();
-            updateStrategySignal();
-            renderProfessionalChart(activeMarketForChart(), currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
+            try { updatePriceCards(); } catch (e) { console.warn('Price cards:', e); }
+            try { updatePrediction(); } catch (e) { console.warn('Prediction:', e); }
+            try { updateGlobalMarkets(); } catch (e) { console.warn('Global markets:', e); }
+            try { updateIndicators(); } catch (e) { console.warn('Indicators:', e); }
+            try { updateStrategySignal(); } catch (e) { console.warn('Strategy:', e); }
+
+            const activeMarket = activeMarketForChart();
+            if (activeMarket && Array.isArray(activeMarket.candleData) && activeMarket.candleData.length > 0) {
+                try {
+                    renderProfessionalChart(activeMarket, currentChart === 'banknifty' ? 'Bank Nifty' : 'Nifty 50');
+                } catch (e) {
+                    console.warn('Professional chart:', e);
+                    const cs = document.getElementById('proChartStatus');
+                    if (cs) cs.textContent = 'Backend connected • chart temporarily unavailable';
+                }
+            }
         }
 
         function updatePriceCards() {
@@ -1233,9 +1246,9 @@ function setConnection(connected, message) {
 
         function updatePrediction() {
             const pred = marketData.prediction;
-            const signals = (pred.signals && typeof pred.signals === 'object') ? pred.signals : {};
+            const signals = pred.signals || {};
             const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
-            const cprBasis = safeText(market.cpr?.basis, 'Daily');
+            const cprBasis = market.cpr?.basis || 'Daily';
             const cprPeriod = market.cpr?.period_label || 'N/A';
             
             const dirEl = document.getElementById('predictionDirection');
@@ -1274,7 +1287,7 @@ function setConnection(connected, message) {
                 signalsHTML += `
                     <div class="signal-item">
                         <span style="color: #cbd5e1;">${signalDescriptions[key] || key}</span>
-                        <span class="signal-badge ${value}">${safeUpper(value)}</span>
+                        <span class="signal-badge ${safeString(value, 'neutral')}">${safeUpper(value)}</span>
                     </div>
                 `;
             }
@@ -1309,7 +1322,7 @@ function setConnection(connected, message) {
             const market = currentChart === 'nifty' ? marketData.nifty : marketData.bankNifty;
             const indicators = market.indicators || {};
             const signals = marketData.prediction?.signals || {};
-            const cprBasis = safeText(market.cpr?.basis, 'Daily');
+            const cprBasis = market.cpr?.basis || 'Daily';
             
             let html = '';
             
@@ -1326,7 +1339,7 @@ function setConnection(connected, message) {
                     <div class="indicator-card">
                         <div class="indicator-label">RSI (14)</div>
                         <div class="indicator-value">${indicators.rsi}</div>
-                        <span class="signal-badge ${signals.rsi || 'neutral'}">${safeUpper(signals.rsi, 'NEUTRAL')}</span>
+                        <span class="signal-badge ${signals.rsi || 'neutral'}">${(signals.rsi || 'neutral').toUpperCase()}</span>
                     </div>
                 `;
             }
@@ -1336,7 +1349,7 @@ function setConnection(connected, message) {
                     <div class="indicator-card">
                         <div class="indicator-label">MACD</div>
                         <div class="indicator-value">${indicators.macd}</div>
-                        <span class="signal-badge ${signals.macd || 'neutral'}">${safeUpper(signals.macd, 'NEUTRAL')}</span>
+                        <span class="signal-badge ${signals.macd || 'neutral'}">${(signals.macd || 'neutral').toUpperCase()}</span>
                     </div>
                 `;
             }
@@ -1346,7 +1359,7 @@ function setConnection(connected, message) {
                     <div class="indicator-card">
                         <div class="indicator-label">SMA (20)</div>
                         <div class="indicator-value">₹${indicators.sma_20}</div>
-                        <span class="signal-badge ${signals.sma || 'neutral'}">${safeUpper(signals.sma, 'NEUTRAL')}</span>
+                        <span class="signal-badge ${signals.sma || 'neutral'}">${(signals.sma || 'neutral').toUpperCase()}</span>
                     </div>
                 `;
             }
@@ -1361,11 +1374,11 @@ function setConnection(connected, message) {
                 `;
             }
             
-            if (market.volume && typeof market.volume === 'object') {
+            if (market.volume) {
                 html += `
                     <div class="indicator-card">
                         <div class="indicator-label">Volume</div>
-                        <div class="indicator-value" style="font-size: 15px;">${Number.isFinite(Number(market.volume.current_volume)) ? (Number(market.volume.current_volume) / 1000000).toFixed(2) + 'M' : '--'}</div>
+                        <div class="indicator-value" style="font-size: 15px;">${(market.volume.current_volume / 1000000).toFixed(2)}M</div>
                         <div style="font-size: 9px; color: #94a3b8; margin-top: 4px;">${safeUpper(market.volume.volume_trend)}</div>
                     </div>
                 `;
@@ -1376,7 +1389,7 @@ function setConnection(connected, message) {
                     <div class="indicator-card">
                         <div class="indicator-label">Momentum</div>
                         <div class="indicator-value ${indicators.momentum > 0 ? 'bullish-text' : 'bearish-text'}">${indicators.momentum}%</div>
-                        <span class="signal-badge ${signals.momentum || 'neutral'}">${safeUpper(signals.momentum, 'NEUTRAL')}</span>
+                        <span class="signal-badge ${signals.momentum || 'neutral'}">${(signals.momentum || 'neutral').toUpperCase()}</span>
                     </div>
                 `;
             }
@@ -1405,22 +1418,22 @@ function setConnection(connected, message) {
                 container.innerHTML = '<div class="strategy-empty">Strategy signal is unavailable. Check that the updated backend is deployed.</div>';
                 return;
             }
-            const side = safeUpper(signal.signal, 'HOLD');
+            const side = String(signal.signal || 'HOLD').toUpperCase();
             const sideClass = side.toLowerCase();
             const icon = side === 'BUY' ? '🟢' : side === 'SELL' ? '🔴' : '🟡';
             const fmt = v => (v === null || v === undefined || Number.isNaN(Number(v))) ? '--' : '₹' + Number(v).toLocaleString('en-IN', {maximumFractionDigits: 2});
-            const structureTags = (structure?.structure || []).slice(-8).map(x => `<span class="structure-tag">${x.type} · ${fmt(x.price)}</span>`).join('') || `<span class="structure-tag">${safeUpper(signal.marketStructure || structure?.trend, 'NEUTRAL')}</span>`;
+            const structureTags = (structure?.structure || []).slice(-8).map(x => `<span class="structure-tag">${x.type} · ${fmt(x.price)}</span>`).join('') || `<span class="structure-tag">${String(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span>`;
             const reasons = (signal.reasons || []).map(r => `<li>✓ ${r}</li>`).join('') || '<li>Waiting for enough confirmation.</li>';
             const prediction = marketData?.prediction || {};
             container.innerHTML = `
                 <div class="strategy-top">
                     <div>
                         <div class="strategy-title">🎯 ${currentChart === 'nifty' ? 'NIFTY 50' : 'BANK NIFTY'} STRATEGY SIGNAL</div>
-                        <div class="strategy-meta"><span class="strategy-pill">Prediction: ${safeUpper(prediction.direction, 'NEUTRAL')}</span><span class="strategy-pill">CPR: ${safeUpper(signal.cprPosition, 'INSIDE')}</span><span class="strategy-pill">Score: ${signal.score ?? '--'}</span></div>
+                        <div class="strategy-meta"><span class="strategy-pill">Prediction: ${(prediction.direction || 'neutral').toUpperCase()}</span><span class="strategy-pill">CPR: ${(signal.cprPosition || 'inside').toUpperCase()}</span><span class="strategy-pill">Score: ${signal.score ?? '--'}</span></div>
                     </div>
                     <div class="strategy-badge ${sideClass}">${icon} ${side}</div>
                 </div>
-                <div class="strategy-meta"><span class="strategy-pill">Strength: ${safeUpper(signal.strength, 'WEAK')}</span><span class="strategy-pill">Confidence: ${signal.confidence ?? '--'}%</span><span class="strategy-pill">Structure: ${safeUpper(signal.marketStructure || structure?.trend, 'NEUTRAL')}</span></div>
+                <div class="strategy-meta"><span class="strategy-pill">Strength: ${(signal.strength || 'weak').toUpperCase()}</span><span class="strategy-pill">Confidence: ${signal.confidence ?? '--'}%</span><span class="strategy-pill">Structure: ${(signal.marketStructure || structure?.trend || 'neutral').toUpperCase()}</span></div>
                 <div class="strategy-grid">
                     <div class="strategy-value"><span>ENTRY</span><strong>${fmt(signal.entry ?? market.current)}</strong></div>
                     <div class="strategy-value"><span>STOP LOSS</span><strong>${fmt(signal.stopLoss)}</strong></div>
@@ -1436,7 +1449,7 @@ function setConnection(connected, message) {
             const marketName = currentChart === 'nifty' ? 'Nifty 50' : 'Bank Nifty';
             const tfLabel = marketData.timeframe_label || safeUpper(currentTimeframe);
             
-            const cprBasis = safeText(market.cpr?.basis, 'Daily');
+            const cprBasis = market.cpr?.basis || 'Daily';
             const cprPeriod = market.cpr?.period_label || 'N/A';
             
             document.getElementById('chartTitle').textContent = `📊 ${marketName} - ${tfLabel}`;
@@ -1485,7 +1498,7 @@ function setConnection(connected, message) {
                 return chartTop + chartHeight - ((price - minPrice) / priceRange) * chartHeight;
             };
             
-            const cprBasis = safeText(market.cpr?.basis, 'Daily');
+            const cprBasis = market.cpr?.basis || 'Daily';
             const cprPeriod = market.cpr?.period_label || 'N/A';
             const srInfo = market.sr_info || {};
             
@@ -1884,7 +1897,7 @@ function renderProfessionalChart(market,name){
   })).filter(x=>Number.isFinite(x.time));
 
   const sig=market.tradeSignal||market.signal||{};
-  const signal=safeUpper(sig.signal||sig.direction, 'HOLD');
+  const signal=String(sig.signal||sig.direction||'HOLD').toUpperCase();
 
   // Find the current/entry candle. Backend can optionally return signalTime/entryTime.
   let signalTime=toUnixTime(sig.signalTime??sig.entryTime??sig.timestamp);
