@@ -9,6 +9,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import ta
 import logging
 import time
@@ -23,6 +24,26 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# ---------------------------------------------------------------------------
+# All market/session logic runs in Indian Standard Time (IST), regardless of
+# what timezone the server (Render, etc.) actually runs in. Every timestamp
+# the API produces — candle times, CPR dates, journal entries, market status —
+# is derived from this so the frontend can trust it's already IST.
+# ---------------------------------------------------------------------------
+IST = ZoneInfo("Asia/Kolkata")
+
+def now_ist():
+    return datetime.now(IST)
+
+def to_ist_index(index):
+    """Make a DatetimeIndex tz-aware in IST, whether it arrived naive or in another tz."""
+    if index.tz is None:
+        # yfinance normally returns exchange-local (already IST) naive timestamps
+        # for NSE symbols; treat naive timestamps as already being IST wall-clock.
+        return index.tz_localize(IST)
+    return index.tz_convert(IST)
+
 CORS(
     app,
     resources={
@@ -100,7 +121,7 @@ def _close_trade(trade, exit_price, status, exit_time):
     try:
         trade['closedAt'] = exit_time.strftime('%Y-%m-%d %H:%M:%S')
     except AttributeError:
-        trade['closedAt'] = datetime.now().isoformat()
+        trade['closedAt'] = now_ist().isoformat()
 
     if trade['signal'] == 'BUY':
         pnl = exit_price - trade['entry']
@@ -174,7 +195,7 @@ def record_signal_for_journal(symbol, timeframe, trade_signal, data):
                 'riskReward': trade_signal.get('riskReward'),
                 'confidence': trade_signal.get('confidence'),
                 'reason': trade_signal.get('reason'),
-                'openedAt': datetime.now().isoformat(),
+                'openedAt': now_ist().isoformat(),
                 'closedAt': None,
                 'status': 'OPEN',
                 'exitPrice': None,
@@ -333,7 +354,7 @@ def calculate_support_resistance_with_period(symbol, timeframe, current_data):
     return support, resistance, {'basis': str(basis), 'period_label': str(period_label)}
 
 def _normalize_yf_data(data):
-    """Normalize Yahoo/yfinance data to a simple OHLCV DataFrame."""
+    """Normalize Yahoo/yfinance data to a simple OHLCV DataFrame, timestamped in IST."""
     if data is None or data.empty:
         return None
     if isinstance(data.columns, pd.MultiIndex):
@@ -341,7 +362,12 @@ def _normalize_yf_data(data):
     required = {"Open", "High", "Low", "Close"}
     if not required.issubset(set(data.columns)):
         return None
-    return data.dropna(subset=["Open", "High", "Low", "Close"])
+    data = data.dropna(subset=["Open", "High", "Low", "Close"])
+    try:
+        data.index = to_ist_index(data.index)
+    except (TypeError, AttributeError) as e:
+        logger.warning(f"Could not normalize index to IST: {e}")
+    return data
 
 
 def _fetch_yahoo_chart_direct(symbol, period, interval):
@@ -438,12 +464,16 @@ def fetch_market_data(symbol, timeframe='15m'):
 
 MIN_STRUCTURE_CANDLES = 21  # 10 left + pivot + 10 right = smallest window that can confirm one swing
 
-def detect_market_structure(data, lookback=100, left_bars=10, right_bars=10, min_candles=MIN_STRUCTURE_CANDLES):
+def detect_market_structure(data, lookback=None, left_bars=10, right_bars=10, min_candles=MIN_STRUCTURE_CANDLES):
     """
     Confirm HH/HL/LH/LL swing points using a fractal window: a candle is only
     accepted as a swing high/low if it is the highest/lowest point across
     `left_bars` candles before it AND `right_bars` candles after it.
     A pivot is confirmed only once `right_bars` candles have completed to its right.
+
+    `lookback=None` (the default) analyzes the ENTIRE fetched dataset rather than
+    an arbitrary recent window, so swing markers cover the whole chart instead of
+    just its most recent candles.
     """
     min_required = max(min_candles, left_bars + right_bars + 1)
     empty = {
@@ -455,7 +485,8 @@ def detect_market_structure(data, lookback=100, left_bars=10, right_bars=10, min
         empty["candlesAnalyzed"] = 0 if data is None else len(data)
         return empty
 
-    d = data.tail(max(min_required, lookback)).copy()
+    effective_lookback = lookback if lookback else len(data)
+    d = data.tail(max(min_required, effective_lookback)).copy()
     highs, lows = [], []
 
     for i in range(left_bars, len(d) - right_bars):
@@ -506,10 +537,13 @@ def detect_market_structure(data, lookback=100, left_bars=10, right_bars=10, min
     else:
         trend, score = "neutral", 0
 
+    # No slicing here: every confirmed HH/HL/LH/LL across the full analyzed
+    # window is returned so the chart can mark the entire visible history,
+    # not just the most recent handful of swings.
     structure = sorted(
         [x for x in swing_highs + swing_lows if x["type"] in ("HH", "HL", "LH", "LL")],
         key=lambda x: x["index"]
-    )[-20:]
+    )
 
     return {
         "valid": True,
@@ -517,8 +551,8 @@ def detect_market_structure(data, lookback=100, left_bars=10, right_bars=10, min
         "candlesAnalyzed": len(d),
         "trend": trend,
         "structure": structure,
-        "swingHighs": swing_highs[-10:],
-        "swingLows": swing_lows[-10:],
+        "swingHighs": swing_highs,
+        "swingLows": swing_lows,
         "lastHighType": last_high,
         "lastLowType": last_low,
         "score": score
@@ -753,11 +787,15 @@ def generate_trade_signal(data, prediction, cpr, support, resistance, market_str
     hold["reason"] = f"HOLD: prediction={direction}, structure={trend}; waiting for high-quality entry near CPR or confirmed breakout"
     return hold
 
-def generate_candlestick_data(data, max_candles=150):
-    """Chart-ready OHLCV data. Frontend can render candles, volume and overlays."""
+def generate_candlestick_data(data, max_candles=None):
+    """
+    Chart-ready OHLCV data, timestamped in IST. By default charts the ENTIRE
+    fetched dataset (max_candles=None) so it lines up 1:1 with the swing
+    structure markers, which are also computed over the full dataset.
+    """
     if data is None or len(data) == 0:
         return []
-    d = data.tail(max_candles)
+    d = data.tail(max_candles) if max_candles else data
     candles = []
     for idx, row in d.iterrows():
         candles.append({
@@ -1115,7 +1153,7 @@ def get_market_data():
             'globalMarkets': global_markets,
             'nifty': nifty_data,
             'bankNifty': banknifty_data,
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': now_ist().isoformat(),
             'market_status': get_market_status(),
             'status': 'success' if provider_available else 'degraded',
             'data_provider_status': (
@@ -1134,10 +1172,10 @@ def get_market_data():
         }), 500
 
 def get_market_status():
-    now = datetime.now()
+    now = now_ist()
     if now.weekday() >= 5: return 'closed'
-    market_open = now.replace(hour=9, minute=15, second=0)
-    market_close = now.replace(hour=15, minute=30, second=0)
+    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
     return 'open' if market_open <= now <= market_close else 'closed'
 
 @app.route('/api/signal-log', methods=['GET'])
@@ -1167,7 +1205,7 @@ def get_signal_log():
             'trades': combined,
             'stats': _compute_journal_stats(combined),
             'count': len(combined),
-            'timestamp': datetime.now().isoformat()
+            'timestamp': now_ist().isoformat()
         })
     except Exception as e:
         logger.exception("Signal log handler exception")
