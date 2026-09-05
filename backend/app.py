@@ -15,6 +15,7 @@ import time
 import os
 import requests
 import json
+import threading
 from types import SimpleNamespace
 
 # Configure logging
@@ -77,7 +78,134 @@ TIMEFRAMES = {
     '1wk': {'period': '2y', 'interval': '1wk', 'label': '1 Week', 'cpr_basis': 'monthly'}
 }
 
-def get_cpr_period_data(symbol, timeframe):
+# ---------------------------------------------------------------------------
+# Buy/Sell Signal Log (Trading Journal)
+#
+# Keeps an in-memory record of every BUY/SELL signal the strategy fires per
+# symbol, and tracks each one through to a close (target hit / stopped out /
+# signal reversed) using the live candle's high/low. This resets whenever the
+# server process restarts (no database), which is fine for a live dashboard
+# journal but worth knowing if you need history to survive a redeploy.
+# ---------------------------------------------------------------------------
+SIGNAL_LOG_LOCK = threading.Lock()
+SIGNAL_LOG = {'^NSEI': [], '^NSEBANK': []}
+_SIGNAL_LOG_COUNTER = 0
+MAX_SIGNAL_LOG_PER_SYMBOL = 200
+SYMBOL_LABELS = {'^NSEI': 'NIFTY 50', '^NSEBANK': 'BANK NIFTY'}
+
+def _close_trade(trade, exit_price, status, exit_time):
+    """Mark a journal entry closed and compute its P&L."""
+    trade['status'] = status
+    trade['exitPrice'] = round(float(exit_price), 2)
+    try:
+        trade['closedAt'] = exit_time.strftime('%Y-%m-%d %H:%M:%S')
+    except AttributeError:
+        trade['closedAt'] = datetime.now().isoformat()
+
+    if trade['signal'] == 'BUY':
+        pnl = exit_price - trade['entry']
+    else:
+        pnl = trade['entry'] - exit_price
+
+    trade['pnlPoints'] = round(float(pnl), 2)
+    trade['pnlPercent'] = round((pnl / trade['entry']) * 100, 2) if trade.get('entry') else 0.0
+
+def record_signal_for_journal(symbol, timeframe, trade_signal, data):
+    """
+    Log a fresh BUY/SELL signal as a new journal entry, and settle any
+    currently open entry for this symbol first — either because price hit
+    its stop/target on the latest candle, or because the strategy's signal
+    has changed direction (or gone back to HOLD).
+    """
+    global _SIGNAL_LOG_COUNTER
+    if data is None or len(data) == 0 or not isinstance(trade_signal, dict):
+        return
+
+    try:
+        last_high = float(data['High'].iloc[-1])
+        last_low = float(data['Low'].iloc[-1])
+        last_close = float(data['Close'].iloc[-1])
+        last_time = data.index[-1]
+    except (KeyError, IndexError, ValueError, TypeError):
+        return
+
+    new_signal = trade_signal.get('signal')
+
+    with SIGNAL_LOG_LOCK:
+        entries = SIGNAL_LOG.setdefault(symbol, [])
+        open_trade = next((t for t in reversed(entries) if t['status'] == 'OPEN'), None)
+
+        # 1) Settle an open trade if the latest candle touched its stop/target.
+        if open_trade:
+            if open_trade['signal'] == 'BUY':
+                if open_trade['stopLoss'] is not None and last_low <= open_trade['stopLoss']:
+                    _close_trade(open_trade, open_trade['stopLoss'], 'STOPPED_OUT', last_time)
+                    open_trade = None
+                elif open_trade['target'] is not None and last_high >= open_trade['target']:
+                    _close_trade(open_trade, open_trade['target'], 'TARGET_HIT', last_time)
+                    open_trade = None
+            elif open_trade['signal'] == 'SELL':
+                if open_trade['stopLoss'] is not None and last_high >= open_trade['stopLoss']:
+                    _close_trade(open_trade, open_trade['stopLoss'], 'STOPPED_OUT', last_time)
+                    open_trade = None
+                elif open_trade['target'] is not None and last_low <= open_trade['target']:
+                    _close_trade(open_trade, open_trade['target'], 'TARGET_HIT', last_time)
+                    open_trade = None
+
+        # 2) If still open but the strategy's signal has moved away from it
+        #    (reversed direction or dropped to HOLD), close it at the current price.
+        if open_trade and new_signal != open_trade['signal']:
+            _close_trade(open_trade, last_close, 'CLOSED_SIGNAL_CHANGE', last_time)
+            open_trade = None
+
+        # 3) Only open a fresh entry when there's no open trade already and the
+        #    strategy has actually produced a BUY/SELL (not just a repeat poll).
+        if not open_trade and new_signal in ('BUY', 'SELL'):
+            _SIGNAL_LOG_COUNTER += 1
+            entries.append({
+                'id': _SIGNAL_LOG_COUNTER,
+                'symbol': symbol,
+                'symbolLabel': SYMBOL_LABELS.get(symbol, symbol),
+                'timeframe': timeframe,
+                'signal': new_signal,
+                'entry': trade_signal.get('entry'),
+                'stopLoss': trade_signal.get('stopLoss'),
+                'target': trade_signal.get('target'),
+                'riskReward': trade_signal.get('riskReward'),
+                'confidence': trade_signal.get('confidence'),
+                'reason': trade_signal.get('reason'),
+                'openedAt': datetime.now().isoformat(),
+                'closedAt': None,
+                'status': 'OPEN',
+                'exitPrice': None,
+                'pnlPoints': None,
+                'pnlPercent': None
+            })
+
+        if len(entries) > MAX_SIGNAL_LOG_PER_SYMBOL:
+            SIGNAL_LOG[symbol] = entries[-MAX_SIGNAL_LOG_PER_SYMBOL:]
+
+def _compute_journal_stats(trades):
+    """Win rate / totals for a list of journal entries (already filtered/sorted by caller)."""
+    closed_statuses = ('TARGET_HIT', 'STOPPED_OUT', 'CLOSED_SIGNAL_CHANGE')
+    closed = [t for t in trades if t['status'] in closed_statuses and t.get('pnlPoints') is not None]
+    wins = [t for t in closed if t['pnlPoints'] > 0]
+    losses = [t for t in closed if t['pnlPoints'] <= 0]
+    open_trades = [t for t in trades if t['status'] == 'OPEN']
+    rr_values = [t['riskReward'] for t in trades if isinstance(t.get('riskReward'), (int, float))]
+
+    return {
+        'totalSignals': len(trades),
+        'openTrades': len(open_trades),
+        'closedTrades': len(closed),
+        'wins': len(wins),
+        'losses': len(losses),
+        'winRate': round((len(wins) / len(closed)) * 100, 1) if closed else 0.0,
+        'avgRiskReward': round(sum(rr_values) / len(rr_values), 2) if rr_values else 0.0,
+        'totalPnlPoints': round(sum(t['pnlPoints'] for t in closed), 2) if closed else 0.0
+    }
+
+
     try:
         ticker = get_ticker(symbol)
         cpr_basis = TIMEFRAMES.get(timeframe, {}).get('cpr_basis', 'daily')
@@ -842,6 +970,12 @@ def process_market_data(symbol, timeframe='15m', prediction=None, data=None):
         if prediction is None:
             prediction = {'direction': 'neutral', 'confidence': 50.0}
         trade_signal = generate_trade_signal(data, prediction, cpr, support, resistance, market_structure)
+
+        try:
+            record_signal_for_journal(symbol, timeframe, trade_signal, data)
+        except Exception as journal_err:
+            logger.error(f"Signal journal update failed for {symbol}: {journal_err}")
+
         chart_overlays = {
             'cpr': [
                 {'name': 'BC', 'value': cpr.get('bc')},
@@ -1005,6 +1139,39 @@ def get_market_status():
     market_open = now.replace(hour=9, minute=15, second=0)
     market_close = now.replace(hour=15, minute=30, second=0)
     return 'open' if market_open <= now <= market_close else 'closed'
+
+@app.route('/api/signal-log', methods=['GET'])
+def get_signal_log():
+    """Trading journal: every BUY/SELL signal fired, with outcome and stats."""
+    try:
+        symbol_param = str(request.args.get('symbol', 'all')).strip().lower()
+        if symbol_param in ('nifty', 'nifty50', 'nifty 50', '^nsei'):
+            symbols = ['^NSEI']
+        elif symbol_param in ('banknifty', 'bank_nifty', 'bank nifty', '^nsebank'):
+            symbols = ['^NSEBANK']
+        else:
+            symbols = ['^NSEI', '^NSEBANK']
+
+        try:
+            limit = max(1, min(500, int(request.args.get('limit', 100))))
+        except (TypeError, ValueError):
+            limit = 100
+
+        with SIGNAL_LOG_LOCK:
+            combined = [dict(t) for sym in symbols for t in SIGNAL_LOG.get(sym, [])]
+
+        combined.sort(key=lambda t: t['id'], reverse=True)
+        combined = combined[:limit]
+
+        return jsonify({
+            'trades': combined,
+            'stats': _compute_journal_stats(combined),
+            'count': len(combined),
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.exception("Signal log handler exception")
+        return jsonify({'error': 'Failed to load signal log', 'details': str(e)}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
