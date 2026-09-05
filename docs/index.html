@@ -987,6 +987,38 @@
     </div>
 
     <script>
+        // ---- IST (Asia/Kolkata) time formatting: this is an Indian-market app, so
+        // every clock/chart/log timestamp shown always displays Indian Standard Time,
+        // regardless of the viewer's own device/browser timezone. Defined first since
+        // updateClock() below runs immediately. ----
+        const IST_TIMEZONE = 'Asia/Kolkata';
+        function istDateParts(unixSeconds) {
+            const d = new Date(unixSeconds * 1000);
+            const fmt = new Intl.DateTimeFormat('en-GB', {
+                timeZone: IST_TIMEZONE, year: 'numeric', month: 'short', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, weekday: 'short'
+            });
+            const parts = {};
+            fmt.formatToParts(d).forEach(p => { parts[p.type] = p.value; });
+            return parts;
+        }
+        function formatISTTime(unixSeconds) {
+            const p = istDateParts(unixSeconds);
+            return `${p.hour}:${p.minute}`;
+        }
+        function formatISTDate(unixSeconds) {
+            const p = istDateParts(unixSeconds);
+            return `${p.day} ${p.month}`;
+        }
+        function formatISTDateTime(unixSeconds) {
+            const p = istDateParts(unixSeconds);
+            return `${p.day} ${p.month} ${p.year}, ${p.hour}:${p.minute} IST`;
+        }
+        function istDateKey(unixSeconds) {
+            const p = istDateParts(unixSeconds);
+            return `${p.year}-${p.month}-${p.day}`;
+        }
+
         let marketData = null;
         let currentChart = 'nifty';
         let currentTimeframe = '15m';
@@ -1056,10 +1088,10 @@ function setConnection(connected, message) {
             }
         }
 
-        // Update clock
+        // Update clock — always shown in IST, regardless of the viewer's own timezone.
         function updateClock() {
-            const now = new Date();
-            document.getElementById('currentTime').textContent = now.toLocaleTimeString();
+            const p = istDateParts(Math.floor(Date.now() / 1000));
+            document.getElementById('currentTime').textContent = `${p.hour}:${p.minute}:${p.second} IST`;
         }
         setInterval(updateClock, 1000);
         updateClock();
@@ -1328,7 +1360,8 @@ function setConnection(connected, message) {
             try {
                 const d = new Date(iso);
                 if (isNaN(d.getTime())) return '--';
-                return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                const p = istDateParts(Math.floor(d.getTime() / 1000));
+                return `${p.day} ${p.month}, ${p.hour}:${p.minute}`;
             } catch (e) { return '--'; }
         }
 
@@ -1966,6 +1999,7 @@ function toUnixTime(v){
   if(Number.isFinite(n)) return Math.floor(n>1e11?n/1000:n);
   const d=Date.parse(v); return Number.isFinite(d)?Math.floor(d/1000):null;
 }
+
 function addSeriesCompat(chart,type,options){
   const LC=window.LightweightCharts;
   if(!LC) throw new Error('Lightweight Charts library did not load');
@@ -1986,7 +2020,19 @@ function resetTradingChart(){
     layout:{background:{type:'solid',color:'#0f172a'},textColor:'#cbd5e1'},
     grid:{vertLines:{color:'rgba(148,163,184,.08)'},horzLines:{color:'rgba(148,163,184,.08)'}},
     rightPriceScale:{borderColor:'rgba(148,163,184,.2)'},
-    timeScale:{borderColor:'rgba(148,163,184,.2)',timeVisible:true,secondsVisible:false},
+    timeScale:{
+      borderColor:'rgba(148,163,184,.2)',timeVisible:true,secondsVisible:false,
+      tickMarkFormatter:(time)=>{
+        const t=typeof time==='object'?Math.floor(new Date(time.year,time.month-1,time.day).getTime()/1000):time;
+        return formatISTTime(t);
+      }
+    },
+    localization:{
+      timeFormatter:(time)=>{
+        const t=typeof time==='object'?Math.floor(new Date(time.year,time.month-1,time.day).getTime()/1000):time;
+        return formatISTDateTime(t);
+      }
+    },
     crosshair:{mode:LightweightCharts.CrosshairMode.Normal}
   });
   candleSeries=addSeriesCompat(tvChart,'candlestick',{upColor:'#22c55e',downColor:'#ef4444',borderVisible:false,wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
@@ -2087,6 +2133,25 @@ function renderProfessionalChart(market,name){
     text:x.type||''
   })).filter(x=>Number.isFinite(x.time));
 
+  // Mark the first candle of each new IST calendar day so different dates'
+  // candles are easy to tell apart when scrolling a multi-day intraday chart.
+  const dayBoundaryMarkers=[];
+  let prevDayKey=null;
+  normalized.forEach(c=>{
+    const key=istDateKey(c.time);
+    if(key!==prevDayKey){
+      dayBoundaryMarkers.push({
+        time:c.time,
+        position:'inBar',
+        color:'#94a3b8',
+        shape:'circle',
+        size:0.6,
+        text:formatISTDate(c.time)
+      });
+      prevDayKey=key;
+    }
+  });
+
   const sig=market.tradeSignal||market.signal||{};
   const signal=String(sig.signal||sig.direction||'HOLD').toUpperCase();
 
@@ -2096,7 +2161,7 @@ function renderProfessionalChart(market,name){
     signalTime=normalized[normalized.length-1].time;
   }
 
-  const signalMarkers=[...structureMarkers];
+  const signalMarkers=[...dayBoundaryMarkers,...structureMarkers];
 
   if(signal==='BUY'){
     signalMarkers.push({
@@ -2122,6 +2187,8 @@ function renderProfessionalChart(market,name){
     if(Number.isFinite(Number(sig.target))) lineOverlay('TARGET '+(sig.riskReward?'R:R '+sig.riskReward:''),sig.target,{color:'#a78bfa',width:2});
   }
 
+  // Lightweight Charts requires markers sorted ascending by time.
+  signalMarkers.sort((a,b)=>a.time-b.time);
   addStructureMarkersCompat(candleSeries,signalMarkers);
 
   const title=document.getElementById('proChartTitle');
