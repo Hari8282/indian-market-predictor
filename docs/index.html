@@ -735,6 +735,36 @@
         .strategy-empty { color:#94a3b8; padding:12px 0; }
         @media (max-width:600px){ .strategy-card{padding:13px}.strategy-grid{grid-template-columns:1fr 1fr}.strategy-value:last-child{grid-column:span 2}.strategy-badge{font-size:19px;padding:7px 12px} }
 
+        /* Trading Journal / Signal Log */
+        .journal-section { margin: 16px 0; background: rgba(255,255,255,0.05); backdrop-filter: blur(10px); border-radius: 15px; padding: 15px; border: 1px solid rgba(255,255,255,0.1); }
+        .journal-header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+        .journal-title { font-size:16px; font-weight:600; }
+        .journal-refresh-btn { background: rgba(255,255,255,0.05); color:#cbd5e1; border:1px solid rgba(255,255,255,0.1); padding:7px 12px; border-radius:6px; cursor:pointer; font-size:11px; font-weight:600; }
+        .journal-refresh-btn:active { transform: scale(0.96); }
+        .journal-stats { display:grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap:8px; margin-bottom:14px; }
+        .journal-stat { background: rgba(255,255,255,0.045); border-radius:10px; padding:9px; text-align:center; }
+        .journal-stat span { display:block; color:#94a3b8; font-size:10px; margin-bottom:3px; text-transform:uppercase; letter-spacing:.03em; }
+        .journal-stat strong { font-size:15px; color:#f8fafc; }
+        .journal-stat strong.positive { color:#34d399; }
+        .journal-stat strong.negative { color:#f87171; }
+        .journal-table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:10px; }
+        .journal-table { width:100%; border-collapse:collapse; font-size:12px; white-space:nowrap; }
+        .journal-table th { text-align:left; color:#94a3b8; font-weight:600; padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.1); font-size:10px; text-transform:uppercase; letter-spacing:.03em; }
+        .journal-table td { padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.06); color:#e2e8f0; }
+        .journal-table tr:last-child td { border-bottom:none; }
+        .journal-signal-badge { padding:3px 8px; border-radius:999px; font-weight:700; font-size:11px; }
+        .journal-signal-badge.buy { background:rgba(16,185,129,.18); color:#34d399; }
+        .journal-signal-badge.sell { background:rgba(239,68,68,.18); color:#f87171; }
+        .journal-status-badge { padding:3px 8px; border-radius:999px; font-weight:600; font-size:10px; }
+        .journal-status-badge.open { background:rgba(139,92,246,.18); color:#c4b5fd; }
+        .journal-status-badge.target { background:rgba(16,185,129,.18); color:#34d399; }
+        .journal-status-badge.stopped { background:rgba(239,68,68,.18); color:#f87171; }
+        .journal-status-badge.changed { background:rgba(148,163,184,.18); color:#cbd5e1; }
+        .journal-pnl.positive { color:#34d399; font-weight:700; }
+        .journal-pnl.negative { color:#f87171; font-weight:700; }
+        .journal-empty { color:#94a3b8; padding:20px; text-align:center; font-size:13px; }
+        @media (max-width:700px){ .journal-stats{grid-template-columns:repeat(3,minmax(0,1fr))} .journal-stat:nth-child(4),.journal-stat:nth-child(5){display:none} }
+
     </style>
 <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <style>
@@ -917,6 +947,42 @@
 
                 </div>
             </div>
+
+            <!-- Buy/Sell Signal Log (Trading Journal) -->
+            <div class="journal-section">
+                <div class="journal-header">
+                    <div class="journal-title">📒 Signal Log — Trading Journal</div>
+                    <button class="journal-refresh-btn" onclick="fetchSignalLog()">Refresh</button>
+                </div>
+                <div class="journal-stats" id="journalStats">
+                    <div class="journal-stat"><span>Total</span><strong id="jStatTotal">--</strong></div>
+                    <div class="journal-stat"><span>Open</span><strong id="jStatOpen">--</strong></div>
+                    <div class="journal-stat"><span>Win Rate</span><strong id="jStatWinRate">--</strong></div>
+                    <div class="journal-stat"><span>Avg R:R</span><strong id="jStatAvgRR">--</strong></div>
+                    <div class="journal-stat"><span>Total P&L (pts)</span><strong id="jStatPnl">--</strong></div>
+                </div>
+                <div class="journal-table-wrap">
+                    <table class="journal-table" id="journalTable">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Symbol</th>
+                                <th>Signal</th>
+                                <th>Entry</th>
+                                <th>Stop Loss</th>
+                                <th>Target</th>
+                                <th>R:R</th>
+                                <th>Status</th>
+                                <th>Exit</th>
+                                <th>P&L</th>
+                            </tr>
+                        </thead>
+                        <tbody id="journalTableBody">
+                            <tr><td colspan="10" class="journal-empty">Loading signal log...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -955,6 +1021,11 @@ function normalizeApiBase(url) {
 function getApiUrl() {
     const base = normalizeApiBase(API_BASE_URL);
     return `${base}/api/market-data`;
+}
+
+function getSignalLogUrl() {
+    const base = normalizeApiBase(API_BASE_URL);
+    return `${base}/api/signal-log?symbol=all&limit=100`;
 }
 
 function setConnection(connected, message) {
@@ -1206,6 +1277,7 @@ function setConnection(connected, message) {
             try { updateGlobalMarkets(); } catch (e) { console.warn('Global markets:', e); }
             try { updateIndicators(); } catch (e) { console.warn('Indicators:', e); }
             try { updateStrategySignal(); } catch (e) { console.warn('Strategy:', e); }
+            fetchSignalLog();
 
             const activeMarket = activeMarketForChart();
             if (activeMarket && Array.isArray(activeMarket.candleData) && activeMarket.candleData.length > 0) {
@@ -1217,6 +1289,98 @@ function setConnection(connected, message) {
                     if (cs) cs.textContent = 'Backend connected • chart temporarily unavailable';
                 }
             }
+        }
+
+        // ---- Buy/Sell Signal Log (Trading Journal) ----
+        let journalFetchInFlight = false;
+
+        async function fetchSignalLog() {
+            if (journalFetchInFlight) return;
+            journalFetchInFlight = true;
+            try {
+                const res = await fetch(getSignalLogUrl());
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                renderSignalJournal(data);
+            } catch (e) {
+                console.warn('Signal log fetch failed:', e);
+                const body = document.getElementById('journalTableBody');
+                if (body && !body.dataset.hasRows) {
+                    body.innerHTML = '<tr><td colspan="10" class="journal-empty">Signal log unavailable — check backend connection.</td></tr>';
+                }
+            } finally {
+                journalFetchInFlight = false;
+            }
+        }
+
+        function journalStatusInfo(status) {
+            switch (status) {
+                case 'OPEN': return { label: 'OPEN', cls: 'open' };
+                case 'TARGET_HIT': return { label: 'TARGET HIT', cls: 'target' };
+                case 'STOPPED_OUT': return { label: 'STOPPED OUT', cls: 'stopped' };
+                case 'CLOSED_SIGNAL_CHANGE': return { label: 'CLOSED', cls: 'changed' };
+                default: return { label: safeUpper(status) || '--', cls: 'changed' };
+            }
+        }
+
+        function formatJournalTime(iso) {
+            if (!iso) return '--';
+            try {
+                const d = new Date(iso);
+                if (isNaN(d.getTime())) return '--';
+                return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            } catch (e) { return '--'; }
+        }
+
+        function renderSignalJournal(data) {
+            const body = document.getElementById('journalTableBody');
+            if (!body) return;
+
+            const stats = (data && data.stats) || {};
+            const totalEl = document.getElementById('jStatTotal');
+            const openEl = document.getElementById('jStatOpen');
+            const winEl = document.getElementById('jStatWinRate');
+            const rrEl = document.getElementById('jStatAvgRR');
+            const pnlEl = document.getElementById('jStatPnl');
+
+            if (totalEl) totalEl.textContent = stats.totalSignals ?? '--';
+            if (openEl) openEl.textContent = stats.openTrades ?? '--';
+            if (winEl) winEl.textContent = (stats.winRate !== undefined && stats.winRate !== null) ? `${stats.winRate}%` : '--';
+            if (rrEl) rrEl.textContent = (stats.avgRiskReward !== undefined && stats.avgRiskReward !== null) ? `1:${stats.avgRiskReward}` : '--';
+            if (pnlEl) {
+                const pnl = stats.totalPnlPoints;
+                pnlEl.textContent = (pnl !== undefined && pnl !== null) ? `${pnl > 0 ? '+' : ''}${pnl}` : '--';
+                pnlEl.className = pnl > 0 ? 'positive' : (pnl < 0 ? 'negative' : '');
+            }
+
+            const trades = (data && Array.isArray(data.trades)) ? data.trades : [];
+            if (trades.length === 0) {
+                body.dataset.hasRows = '';
+                body.innerHTML = '<tr><td colspan="10" class="journal-empty">No signals logged yet — a row appears here the moment a BUY/SELL fires.</td></tr>';
+                return;
+            }
+
+            body.dataset.hasRows = '1';
+            body.innerHTML = trades.map(t => {
+                const sig = safeUpper(t.signal) === 'SELL' ? 'sell' : 'buy';
+                const st = journalStatusInfo(t.status);
+                const pnl = t.pnlPoints;
+                const pnlText = (pnl === null || pnl === undefined) ? '--' : `${pnl > 0 ? '+' : ''}${pnl}`;
+                const pnlCls = (pnl > 0) ? 'positive' : (pnl < 0 ? 'negative' : '');
+                return `
+                    <tr>
+                        <td>${formatJournalTime(t.openedAt)}</td>
+                        <td>${safeString(t.symbolLabel || t.symbol, '--')}</td>
+                        <td><span class="journal-signal-badge ${sig}">${safeUpper(t.signal)}</span></td>
+                        <td>${t.entry ?? '--'}</td>
+                        <td>${t.stopLoss ?? '--'}</td>
+                        <td>${t.target ?? '--'}</td>
+                        <td>${(t.riskReward !== undefined && t.riskReward !== null) ? `1:${t.riskReward}` : '--'}</td>
+                        <td><span class="journal-status-badge ${st.cls}">${st.label}</span></td>
+                        <td>${t.exitPrice ?? '--'}</td>
+                        <td class="journal-pnl ${pnlCls}">${pnlText}</td>
+                    </tr>`;
+            }).join('');
         }
 
         function updatePriceCards() {
@@ -1699,6 +1863,7 @@ function setConnection(connected, message) {
             }
             
             fetchMarketData();
+            fetchSignalLog();
         });
         
         window.addEventListener('resize', () => {
