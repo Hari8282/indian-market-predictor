@@ -205,7 +205,7 @@ def _compute_journal_stats(trades):
         'totalPnlPoints': round(sum(t['pnlPoints'] for t in closed), 2) if closed else 0.0
     }
 
-
+def get_cpr_period_data(symbol, timeframe):
     try:
         ticker = get_ticker(symbol)
         cpr_basis = TIMEFRAMES.get(timeframe, {}).get('cpr_basis', 'daily')
