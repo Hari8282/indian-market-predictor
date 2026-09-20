@@ -452,6 +452,9 @@ def _daily_ohlc_from_5m(intraday_df):
 
 ENTRY_RANGE_FRACTION = 0.55  # entry triggers once price closes beyond this fraction of the 1st candle's range
 STOP_LOSS_BUFFER_POINTS = 20  # fixed-point buffer added to the entry candle's low/high for stop candidate #1
+TRAIL_TRIGGER_R = 1.5    # once open profit reaches this many R, the trailing adjustment activates
+TRAIL_LOCK_R = 1.0       # stop is moved to lock in this many R of profit once triggered
+EXTENDED_TARGET_R = 3.0  # target is extended to this many R (from the original 2R) once the trail activates
 
 def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_points=STOP_LOSS_BUFFER_POINTS):
     """
@@ -475,7 +478,8 @@ def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_points=STOP_LOSS_
         valid = [c for c in candidates if c > entry]
         return min(valid) if valid else None
 
-def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTION, stop_buffer=STOP_LOSS_BUFFER_POINTS):
+def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTION, stop_buffer=STOP_LOSS_BUFFER_POINTS,
+                  trail_trigger_r=TRAIL_TRIGGER_R, trail_lock_r=TRAIL_LOCK_R, extended_target_r=EXTENDED_TARGET_R):
     """
     Backtest the opening-range breakout strategy over the archived 5m history:
 
@@ -574,7 +578,8 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTI
                     risk = entry - stop
                     if risk > 0:
                         target = round(entry + risk * min_rr, 2)
-                        trade = _simulate_trade(day_candles, entry_time, 'BUY', entry, stop, target, risk, d, global_status, first_candle_label)
+                        trade = _simulate_trade(day_candles, entry_time, 'BUY', entry, stop, target, risk, d, global_status, first_candle_label,
+                                                 trail_trigger_r, trail_lock_r, extended_target_r)
 
         elif global_status == 'bearish' and first_red and below_bc:
             setups_identified += 1
@@ -589,7 +594,8 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTI
                     risk = stop - entry
                     if risk > 0:
                         target = round(entry - risk * min_rr, 2)
-                        trade = _simulate_trade(day_candles, entry_time, 'SELL', entry, stop, target, risk, d, global_status, first_candle_label)
+                        trade = _simulate_trade(day_candles, entry_time, 'SELL', entry, stop, target, risk, d, global_status, first_candle_label,
+                                                 trail_trigger_r, trail_lock_r, extended_target_r)
 
         if trade:
             trades.append(trade)
@@ -604,33 +610,62 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTI
         "dataSource": data_source,
         "entryRangeFraction": entry_fraction,
         "stopLossBufferPoints": stop_buffer,
+        "trailing": {"triggerR": trail_trigger_r, "lockR": trail_lock_r, "extendedTargetR": extended_target_r},
         "historyRange": {
             "from": intraday.index[0].strftime('%Y-%m-%d'),
             "to": intraday.index[-1].strftime('%Y-%m-%d')
         }
     }
 
-def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, trade_date, global_status, first_candle_label):
-    """Walk forward through the rest of the day's candles to find the exit."""
+def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, trade_date,
+                     global_status, first_candle_label,
+                     trail_trigger_r=TRAIL_TRIGGER_R, trail_lock_r=TRAIL_LOCK_R, extended_target_r=EXTENDED_TARGET_R):
+    """
+    Walk forward through the rest of the day's candles to find the exit.
+
+    Trailing stop/target: once the trade's open profit reaches `trail_trigger_r`
+    R (checked off each candle's favorable extreme -- High for BUY, Low for
+    SELL), the stop is moved to lock in `trail_lock_r` R of profit and the
+    target is extended out to `extended_target_r` R, both measured off the
+    original entry risk. This is a single step adjustment (not a continuous
+    ratchet) and only ever moves the stop in the trade's favor.
+
+    Within any one candle, the CURRENT stop is always checked before the
+    trail-trigger condition -- OHLC data can't tell us the exact intra-candle
+    order price touched levels in, so a candle can't both stop the trade out
+    and trail it; the conservative (stop-first) reading wins, same as the
+    non-trailing exit checks below.
+    """
     after_entry = day_candles[day_candles.index > entry_time]
     exit_price, exit_reason, exit_time = None, 'EOD_CLOSE', None
+    current_stop, current_target = stop, target
+    trailed = False
 
     for t, row in after_entry.iterrows():
         high, low = float(row['High']), float(row['Low'])
+
         if signal == 'BUY':
-            if low <= stop:
-                exit_price, exit_reason, exit_time = stop, 'STOPPED_OUT', t
+            if low <= current_stop:
+                exit_price, exit_reason, exit_time = current_stop, ('TRAILED_STOP' if trailed else 'STOPPED_OUT'), t
                 break
-            if high >= target:
-                exit_price, exit_reason, exit_time = target, 'TARGET_HIT', t
+            if high >= current_target:
+                exit_price, exit_reason, exit_time = current_target, 'TARGET_HIT', t
                 break
+            if not trailed and risk > 0 and (high - entry) / risk >= trail_trigger_r:
+                current_stop = entry + trail_lock_r * risk
+                current_target = entry + extended_target_r * risk
+                trailed = True
         else:
-            if high >= stop:
-                exit_price, exit_reason, exit_time = stop, 'STOPPED_OUT', t
+            if high >= current_stop:
+                exit_price, exit_reason, exit_time = current_stop, ('TRAILED_STOP' if trailed else 'STOPPED_OUT'), t
                 break
-            if low <= target:
-                exit_price, exit_reason, exit_time = target, 'TARGET_HIT', t
+            if low <= current_target:
+                exit_price, exit_reason, exit_time = current_target, 'TARGET_HIT', t
                 break
+            if not trailed and risk > 0 and (entry - low) / risk >= trail_trigger_r:
+                current_stop = entry - trail_lock_r * risk
+                current_target = entry - extended_target_r * risk
+                trailed = True
 
     if exit_price is None:
         exit_price = float(day_candles.iloc[-1]['Close'])
@@ -647,12 +682,13 @@ def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, 
         "entryTime": entry_time.strftime('%H:%M'),
         "exitTime": exit_time.strftime('%H:%M') if exit_time is not None else None,
         "entry": round(entry, 2),
-        "stopLoss": round(stop, 2),
-        "target": round(target, 2),
+        "stopLoss": round(current_stop, 2),
+        "target": round(current_target, 2),
         "exitPrice": round(exit_price, 2),
         "riskReward": achieved_rr,
         "status": exit_reason,
-        "pnlPoints": round(pnl, 2)
+        "pnlPoints": round(pnl, 2),
+        "trailed": trailed
     }
 
 def _backtest_stats(trades):
@@ -660,7 +696,7 @@ def _backtest_stats(trades):
         return {
             "totalTrades": 0, "wins": 0, "losses": 0, "winRate": 0.0,
             "totalPnlPoints": 0.0, "avgPnlPoints": 0.0, "avgRiskReward": 0.0,
-            "targetHits": 0, "stopOuts": 0, "eodCloses": 0
+            "targetHits": 0, "stopOuts": 0, "trailedStops": 0, "eodCloses": 0
         }
     wins = [t for t in trades if t['pnlPoints'] > 0]
     losses = [t for t in trades if t['pnlPoints'] <= 0]
@@ -676,6 +712,7 @@ def _backtest_stats(trades):
         "avgRiskReward": round(sum(rr_values) / len(rr_values), 2) if rr_values else 0.0,
         "targetHits": sum(1 for t in trades if t['status'] == 'TARGET_HIT'),
         "stopOuts": sum(1 for t in trades if t['status'] == 'STOPPED_OUT'),
+        "trailedStops": sum(1 for t in trades if t['status'] == 'TRAILED_STOP'),
         "eodCloses": sum(1 for t in trades if t['status'] == 'EOD_CLOSE')
     }
 
@@ -1756,7 +1793,20 @@ def get_backtest():
             stop_buffer = max(0.0, float(stop_buffer)) if stop_buffer is not None else STOP_LOSS_BUFFER_POINTS
         except (TypeError, ValueError):
             stop_buffer = STOP_LOSS_BUFFER_POINTS
-        result = run_backtest(symbol, days=days, entry_fraction=entry_fraction, stop_buffer=stop_buffer)
+        try:
+            trail_trigger_r = float(request.args.get('trailTriggerR', TRAIL_TRIGGER_R))
+        except (TypeError, ValueError):
+            trail_trigger_r = TRAIL_TRIGGER_R
+        try:
+            trail_lock_r = float(request.args.get('trailLockR', TRAIL_LOCK_R))
+        except (TypeError, ValueError):
+            trail_lock_r = TRAIL_LOCK_R
+        try:
+            extended_target_r = float(request.args.get('extendedTargetR', EXTENDED_TARGET_R))
+        except (TypeError, ValueError):
+            extended_target_r = EXTENDED_TARGET_R
+        result = run_backtest(symbol, days=days, entry_fraction=entry_fraction, stop_buffer=stop_buffer,
+                               trail_trigger_r=trail_trigger_r, trail_lock_r=trail_lock_r, extended_target_r=extended_target_r)
         result['timestamp'] = now_ist().isoformat()
         return jsonify(result)
     except Exception as e:
