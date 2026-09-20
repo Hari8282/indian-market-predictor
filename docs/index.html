@@ -1023,18 +1023,20 @@
                             <tr>
                                 <th>Date</th>
                                 <th>Global</th>
-                                <th>1st 5m</th>
+                                <th>Signal</th>
+                                <th>Entry Time</th>
                                 <th>Entry</th>
                                 <th>Stop</th>
                                 <th>Target</th>
                                 <th>R:R</th>
+                                <th>Exit Time</th>
                                 <th>Exit</th>
                                 <th>Outcome</th>
                                 <th>P&L</th>
                             </tr>
                         </thead>
                         <tbody id="backtestTableBody">
-                            <tr><td colspan="10" class="journal-empty">Choose a symbol/range and click "Run Backtest".</td></tr>
+                            <tr><td colspan="12" class="journal-empty">Choose a symbol/range and click "Run Backtest".</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1421,6 +1423,7 @@ function setConnection(connected, message) {
                 case 'OPEN': return { label: 'OPEN', cls: 'open' };
                 case 'TARGET_HIT': return { label: 'TARGET HIT', cls: 'target' };
                 case 'STOPPED_OUT': return { label: 'STOPPED OUT', cls: 'stopped' };
+                case 'TRAILED_STOP': return { label: 'TRAILED STOP', cls: 'target' };
                 case 'CLOSED_SIGNAL_CHANGE': return { label: 'CLOSED', cls: 'changed' };
                 case 'EOD_CLOSE': return { label: 'EOD CLOSE', cls: 'changed' };
                 default: return { label: safeUpper(status) || '--', cls: 'changed' };
@@ -1526,7 +1529,7 @@ function setConnection(connected, message) {
             const days = document.getElementById('backtestDays')?.value || '100';
             const body = document.getElementById('backtestTableBody');
             const note = document.getElementById('backtestNote');
-            if (body) body.innerHTML = '<tr><td colspan="10" class="journal-empty">Running backtest...</td></tr>';
+            if (body) body.innerHTML = '<tr><td colspan="12" class="journal-empty">Running backtest...</td></tr>';
             if (note) note.textContent = '';
             try {
                 const res = await fetch(getBacktestUrl(symbol, days));
@@ -1535,7 +1538,7 @@ function setConnection(connected, message) {
                 renderBacktestResults(data);
             } catch (e) {
                 console.warn('Backtest fetch failed:', e);
-                if (body) body.innerHTML = `<tr><td colspan="10" class="journal-empty">Backtest failed: ${e.message}</td></tr>`;
+                if (body) body.innerHTML = `<tr><td colspan="12" class="journal-empty">Backtest failed: ${e.message}</td></tr>`;
             }
         }
 
@@ -1581,7 +1584,7 @@ function setConnection(connected, message) {
 
             const trades = Array.isArray(data.trades) ? data.trades : [];
             if (trades.length === 0) {
-                body.innerHTML = '<tr><td colspan="10" class="journal-empty">No qualifying setups found in this range.</td></tr>';
+                body.innerHTML = '<tr><td colspan="12" class="journal-empty">No qualifying setups found in this range.</td></tr>';
                 return;
             }
 
@@ -1591,17 +1594,19 @@ function setConnection(connected, message) {
                 const pnlText = (pnl === null || pnl === undefined) ? '--' : `${pnl > 0 ? '+' : ''}${pnl}`;
                 const pnlCls = (pnl > 0) ? 'positive' : (pnl < 0 ? 'negative' : '');
                 const globalCls = safeUpper(t.globalStatus) === 'BEARISH' ? 'sell' : 'buy';
-                const candleCls = safeUpper(t.firstCandle) === 'RED' ? 'sell' : 'buy';
+                const sigCls = safeUpper(t.signal) === 'SELL' ? 'sell' : 'buy';
                 const rr = (t.riskReward !== undefined && t.riskReward !== null) ? `${t.riskReward > 0 ? '+' : ''}${t.riskReward}R` : '--';
                 return `
                     <tr>
                         <td>${safeString(t.date, '--')}</td>
                         <td><span class="journal-signal-badge ${globalCls}">${safeUpper(t.globalStatus)}</span></td>
-                        <td><span class="journal-signal-badge ${candleCls}">${safeUpper(t.firstCandle)}</span></td>
+                        <td><span class="journal-signal-badge ${sigCls}">${safeUpper(t.signal)}</span></td>
+                        <td>${t.entryTime ?? '--'}</td>
                         <td>${t.entry ?? '--'}</td>
                         <td>${t.stopLoss ?? '--'}</td>
                         <td>${t.target ?? '--'}</td>
                         <td>${rr}</td>
+                        <td>${t.exitTime ?? '--'}</td>
                         <td>${t.exitPrice ?? '--'}</td>
                         <td><span class="journal-status-badge ${st.cls}">${st.label}</span></td>
                         <td class="journal-pnl ${pnlCls}">${pnlText}</td>
