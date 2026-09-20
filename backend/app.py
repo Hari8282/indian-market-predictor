@@ -8,7 +8,7 @@ from flask_cors import CORS
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import ta
 import logging
@@ -17,6 +17,8 @@ import os
 import requests
 import json
 import threading
+import io
+import base64
 from types import SimpleNamespace
 
 # Configure logging
@@ -114,6 +116,220 @@ _SIGNAL_LOG_COUNTER = 0
 MAX_SIGNAL_LOG_PER_SYMBOL = 200
 SYMBOL_LABELS = {'^NSEI': 'NIFTY 50', '^NSEBANK': 'BANK NIFTY'}
 
+# ---------------------------------------------------------------------------
+# 5-minute history archive (GitHub-backed) + backtesting
+#
+# Render's filesystem is ephemeral (wiped on every redeploy/restart), and
+# Yahoo Finance only retains 5-minute candles for roughly the trailing 60
+# calendar days no matter how a request is chunked. So a rolling ~100-day
+# archive has to be built by ACCUMULATING data over time: each sync fetches
+# whatever 5m history Yahoo currently has, merges it into a CSV kept in a
+# GitHub repo (which survives redeploys), and trims anything older than
+# HISTORY_RETENTION_DAYS. Call /api/history/sync daily (e.g. after close) and
+# the stored file gradually grows past Yahoo's 60-day window.
+#
+# Configure via environment variables on Render:
+#   GITHUB_TOKEN     - a personal access token with 'repo' contents write scope
+#   GITHUB_REPO      - "yourusername/yourrepo"
+#   GITHUB_BRANCH    - defaults to "main"
+#   GITHUB_DATA_DIR  - folder inside the repo, defaults to "market_data"
+# ---------------------------------------------------------------------------
+GITHUB_API = "https://api.github.com"
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+GITHUB_REPO = os.environ.get("GITHUB_REPO")
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
+GITHUB_DATA_DIR = os.environ.get("GITHUB_DATA_DIR", "market_data")
+HISTORY_RETENTION_DAYS = 100
+HISTORY_SYMBOLS = {'^NSEI': 'NIFTY', '^NSEBANK': 'BANKNIFTY'}
+
+def github_configured():
+    return bool(GITHUB_TOKEN and GITHUB_REPO)
+
+def _github_headers():
+    return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+
+def _history_file_path(symbol):
+    name = HISTORY_SYMBOLS.get(symbol, symbol.replace('^', '').replace('/', '_'))
+    return f"{GITHUB_DATA_DIR}/{name}_5m.csv"
+
+def github_get_file(path):
+    """Return (content_str, sha) for an existing repo file, or (None, None) if absent/unconfigured."""
+    if not github_configured():
+        return None, None
+    url = f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{path}"
+    try:
+        r = requests.get(url, headers=_github_headers(), params={"ref": GITHUB_BRANCH}, timeout=20)
+        if r.status_code == 200:
+            j = r.json()
+            content = base64.b64decode(j["content"]).decode("utf-8")
+            return content, j["sha"]
+        if r.status_code == 404:
+            return None, None
+        logger.warning(f"GitHub read failed for {path}: {r.status_code} {r.text[:200]}")
+        return None, None
+    except requests.RequestException as e:
+        logger.warning(f"GitHub read error for {path}: {e}")
+        return None, None
+
+def github_put_file(path, content_str, message, sha=None):
+    """Create or update a file in the configured GitHub repo. Raises on failure."""
+    if not github_configured():
+        raise RuntimeError("GITHUB_TOKEN and/or GITHUB_REPO are not configured on the server")
+    url = f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{path}"
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content_str.encode("utf-8")).decode("utf-8"),
+        "branch": GITHUB_BRANCH
+    }
+    if sha:
+        payload["sha"] = sha
+    r = requests.put(url, headers=_github_headers(), json=payload, timeout=30)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"GitHub write failed ({r.status_code}): {r.text[:300]}")
+    return r.json()
+
+def _history_df_to_csv(df):
+    out = io.StringIO()
+    df.reset_index().rename(columns={df.index.name or 'index': 'Datetime'}).to_csv(out, index=False)
+    return out.getvalue()
+
+def _csv_to_history_df(csv_str):
+    df = pd.read_csv(io.StringIO(csv_str))
+    if 'Datetime' not in df.columns:
+        return None
+    df['Datetime'] = pd.to_datetime(df['Datetime'], utc=True, errors='coerce')
+    df = df.dropna(subset=['Datetime']).set_index('Datetime')
+    df.index = df.index.tz_convert(IST)
+    for col in ('Open', 'High', 'Low', 'Close', 'Volume'):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    return df.dropna(subset=['Open', 'High', 'Low', 'Close']).sort_index()
+
+def fetch_5m_history_chunked(symbol, days=60, chunk_days=7):
+    """
+    Pull 5-minute candles by looping backward through `chunk_days`-sized date
+    windows rather than one big request. Yahoo caps 5m history at ~60 days
+    regardless of chunking, so `days` is clamped to that; chunking is purely
+    to make each individual request smaller/more reliable.
+    """
+    days = min(days, 60)
+    end = now_ist()
+    start_floor = end - timedelta(days=days)
+    frames = []
+    cursor_end = end
+    ticker = get_ticker(symbol)
+
+    while cursor_end > start_floor:
+        cursor_start = max(start_floor, cursor_end - timedelta(days=chunk_days))
+        try:
+            chunk = ticker.history(
+                start=cursor_start.strftime('%Y-%m-%d'),
+                end=(cursor_end + timedelta(days=1)).strftime('%Y-%m-%d'),
+                interval='5m', timeout=15
+            )
+            chunk = _normalize_yf_data(chunk)
+            if chunk is not None and len(chunk):
+                frames.append(chunk)
+        except Exception as e:
+            logger.warning(f"5m history chunk failed for {symbol} [{cursor_start.date()} .. {cursor_end.date()}]: {e}")
+        cursor_end = cursor_start
+        time.sleep(0.25)  # be polite between chunked requests
+
+    if not frames:
+        return None
+    combined = pd.concat(frames)
+    combined = combined[~combined.index.duplicated(keep='last')].sort_index()
+    return combined
+
+def sync_5m_history_to_github(symbol):
+    """Fetch what Yahoo currently has, merge with the archive already in GitHub, trim, and store."""
+    path = _history_file_path(symbol)
+    existing_csv, sha = github_get_file(path)
+    existing_df = _csv_to_history_df(existing_csv) if existing_csv else None
+
+    fresh_df = fetch_5m_history_chunked(symbol, days=60)
+
+    if fresh_df is None and existing_df is None:
+        return {"symbol": symbol, "status": "no_data", "rows": 0}
+
+    parts = [d for d in (existing_df, fresh_df) if d is not None and len(d)]
+    if not parts:
+        return {"symbol": symbol, "status": "no_data", "rows": 0}
+
+    merged = pd.concat(parts)
+    merged = merged[~merged.index.duplicated(keep='last')].sort_index()
+
+    cutoff = now_ist() - timedelta(days=HISTORY_RETENTION_DAYS)
+    merged = merged[merged.index >= cutoff]
+
+    if len(merged) == 0:
+        return {"symbol": symbol, "status": "no_data", "rows": 0}
+
+    csv_str = _history_df_to_csv(merged)
+    try:
+        github_put_file(path, csv_str, f"Update {HISTORY_SYMBOLS.get(symbol, symbol)} 5m history ({len(merged)} rows)", sha=sha)
+    except RuntimeError as e:
+        return {"symbol": symbol, "status": "error", "error": str(e)}
+
+    trading_days = pd.Series(merged.index.date).nunique()
+    return {
+        "symbol": symbol,
+        "status": "ok",
+        "rows": int(len(merged)),
+        "tradingDays": int(trading_days),
+        "from": merged.index[0].strftime('%Y-%m-%d'),
+        "to": merged.index[-1].strftime('%Y-%m-%d')
+    }
+
+def load_5m_history(symbol):
+    """Load the archived 5m history for a symbol from GitHub. Returns None if unavailable."""
+    csv_str, _ = github_get_file(_history_file_path(symbol))
+    if not csv_str:
+        return None
+    return _csv_to_history_df(csv_str)
+
+def fetch_global_daily_history(period='400d'):
+    """Daily OHLC history (no 60-day limit) for every configured global index."""
+    out = {}
+    for region, indices in GLOBAL_INDICES.items():
+        for sym in indices:
+            try:
+                df = _normalize_yf_data(get_ticker(sym).history(period=period, interval='1d', timeout=15))
+                if df is not None and len(df):
+                    out[sym] = df
+            except Exception as e:
+                logger.warning(f"Global daily history failed for {sym}: {e}")
+    return out
+
+def historical_global_status(global_daily, target_date):
+    """
+    Replicate fetch_global_markets()'s bullish/bearish classification, but as
+    it would have read using each index's last close on/before `target_date`
+    versus the close before that — i.e. a point-in-time version of the same
+    >60%/<40% positive-index-ratio rule used live.
+    """
+    positive, total = 0, 0
+    for sym, df in global_daily.items():
+        try:
+            asof = df[df.index.date <= target_date]
+            if len(asof) < 2:
+                continue
+            current = float(asof['Close'].iloc[-1])
+            prev = float(asof['Close'].iloc[-2])
+            total += 1
+            if prev > 0 and current > prev:
+                positive += 1
+        except Exception:
+            continue
+    if total == 0:
+        return 'neutral'
+    ratio = positive / total
+    if ratio > 0.6:
+        return 'bullish'
+    if ratio < 0.4:
+        return 'bearish'
+    return 'neutral'
+
 def _close_trade(trade, exit_price, status, exit_time):
     """Mark a journal entry closed and compute its P&L."""
     trade['status'] = status
@@ -205,6 +421,185 @@ def record_signal_for_journal(symbol, timeframe, trade_signal, data):
 
         if len(entries) > MAX_SIGNAL_LOG_PER_SYMBOL:
             SIGNAL_LOG[symbol] = entries[-MAX_SIGNAL_LOG_PER_SYMBOL:]
+
+def _daily_ohlc_from_5m(intraday_df):
+    """Resample 5m candles into one Open/High/Low/Close row per IST calendar day."""
+    daily = intraday_df.groupby(intraday_df.index.date).agg(
+        Open=('Open', 'first'), High=('High', 'max'), Low=('Low', 'min'), Close=('Close', 'last')
+    )
+    return daily
+
+def run_backtest(symbol, days=100, min_rr=2.0):
+    """
+    Backtest the opening-range breakout strategy over the archived 5m history:
+
+      BUY  -> global market status bullish AND the day's 1st 5m candle is green
+              AND its close is above the day's CPR TC, THEN the first later
+              candle whose close breaks above the 1st candle's high triggers
+              entry. Stop = 1st candle's low. Target = entry + risk * min_rr
+              (the same minimum 1:2 reward:risk the live strategy enforces).
+
+      SELL -> the mirror image: bearish global status, red 1st candle below
+              CPR BC, entry on a later close breaking below the 1st candle's low.
+
+    Only one trade is taken per day (the first qualifying breakout); if
+    neither target nor stop is hit by the day's last candle, the trade is
+    closed at that last candle's close (EOD_CLOSE), matching intraday practice.
+    """
+    intraday = load_5m_history(symbol)
+    data_source = 'github_archive'
+    if intraday is None or len(intraday) == 0:
+        intraday = fetch_5m_history_chunked(symbol, days=60)
+        data_source = 'live_fallback_max_60d'
+    if intraday is None or len(intraday) == 0:
+        return {
+            "symbol": symbol, "trades": [], "stats": _backtest_stats([]),
+            "daysAnalyzed": 0, "dataSource": "unavailable",
+            "note": "No 5m history available yet. Run /api/history/sync first (requires GITHUB_TOKEN/GITHUB_REPO), or wait for the live fallback to have data."
+        }
+
+    cutoff = now_ist() - timedelta(days=days)
+    intraday = intraday[intraday.index >= cutoff]
+    if len(intraday) == 0:
+        return {
+            "symbol": symbol, "trades": [], "stats": _backtest_stats([]),
+            "daysAnalyzed": 0, "dataSource": data_source,
+            "note": "No candles fall within the requested day range."
+        }
+
+    daily_ohlc = _daily_ohlc_from_5m(intraday)
+    global_daily = fetch_global_daily_history()
+
+    trades = []
+    trading_dates = sorted(set(intraday.index.date))
+
+    for i, d in enumerate(trading_dates):
+        if i == 0:
+            continue  # no prior day available for CPR yet
+        prev_date = trading_dates[i - 1]
+        if prev_date not in daily_ohlc.index:
+            continue
+        prev = daily_ohlc.loc[prev_date]
+        pivot = (float(prev['High']) + float(prev['Low']) + float(prev['Close'])) / 3
+        bc = (float(prev['High']) + float(prev['Low'])) / 2
+        tc = (pivot - bc) + pivot
+
+        day_candles = intraday[intraday.index.date == d]
+        if len(day_candles) < 2:
+            continue
+
+        first = day_candles.iloc[0]
+        rest = day_candles.iloc[1:]
+        global_status = historical_global_status(global_daily, d)
+
+        first_green = float(first['Close']) > float(first['Open'])
+        first_red = float(first['Close']) < float(first['Open'])
+        above_tc = float(first['Close']) > tc
+        below_bc = float(first['Close']) < bc
+
+        trade = None
+        if global_status == 'bullish' and first_green and above_tc:
+            trigger = rest[rest['Close'] > float(first['High'])]
+            if len(trigger):
+                entry_row = trigger.iloc[0]
+                entry_time = trigger.index[0]
+                entry = float(entry_row['Close'])
+                stop = float(first['Low'])
+                risk = entry - stop
+                if risk > 0:
+                    target = round(entry + risk * min_rr, 2)
+                    trade = _simulate_trade(day_candles, entry_time, 'BUY', entry, stop, target, risk, min_rr, d)
+
+        elif global_status == 'bearish' and first_red and below_bc:
+            trigger = rest[rest['Close'] < float(first['Low'])]
+            if len(trigger):
+                entry_row = trigger.iloc[0]
+                entry_time = trigger.index[0]
+                entry = float(entry_row['Close'])
+                stop = float(first['High'])
+                risk = stop - entry
+                if risk > 0:
+                    target = round(entry - risk * min_rr, 2)
+                    trade = _simulate_trade(day_candles, entry_time, 'SELL', entry, stop, target, risk, min_rr, d)
+
+        if trade:
+            trades.append(trade)
+
+    return {
+        "symbol": symbol,
+        "symbolLabel": SYMBOL_LABELS.get(symbol, symbol),
+        "trades": trades,
+        "stats": _backtest_stats(trades),
+        "daysAnalyzed": len(trading_dates) - 1,
+        "dataSource": data_source,
+        "historyRange": {
+            "from": intraday.index[0].strftime('%Y-%m-%d'),
+            "to": intraday.index[-1].strftime('%Y-%m-%d')
+        }
+    }
+
+def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, min_rr, trade_date):
+    """Walk forward through the rest of the day's candles to find the exit."""
+    after_entry = day_candles[day_candles.index > entry_time]
+    exit_price, exit_reason, exit_time = None, 'EOD_CLOSE', None
+
+    for t, row in after_entry.iterrows():
+        high, low = float(row['High']), float(row['Low'])
+        if signal == 'BUY':
+            if low <= stop:
+                exit_price, exit_reason, exit_time = stop, 'STOPPED_OUT', t
+                break
+            if high >= target:
+                exit_price, exit_reason, exit_time = target, 'TARGET_HIT', t
+                break
+        else:
+            if high >= stop:
+                exit_price, exit_reason, exit_time = stop, 'STOPPED_OUT', t
+                break
+            if low <= target:
+                exit_price, exit_reason, exit_time = target, 'TARGET_HIT', t
+                break
+
+    if exit_price is None:
+        exit_price = float(day_candles.iloc[-1]['Close'])
+        exit_time = day_candles.index[-1]
+
+    pnl = (exit_price - entry) if signal == 'BUY' else (entry - exit_price)
+
+    return {
+        "date": trade_date.strftime('%Y-%m-%d'),
+        "signal": signal,
+        "entryTime": entry_time.strftime('%H:%M'),
+        "exitTime": exit_time.strftime('%H:%M') if exit_time is not None else None,
+        "entry": round(entry, 2),
+        "stopLoss": round(stop, 2),
+        "target": round(target, 2),
+        "exitPrice": round(exit_price, 2),
+        "riskReward": round(min_rr, 2),
+        "status": exit_reason,
+        "pnlPoints": round(pnl, 2)
+    }
+
+def _backtest_stats(trades):
+    if not trades:
+        return {
+            "totalTrades": 0, "wins": 0, "losses": 0, "winRate": 0.0,
+            "totalPnlPoints": 0.0, "avgPnlPoints": 0.0, "targetHits": 0, "stopOuts": 0, "eodCloses": 0
+        }
+    wins = [t for t in trades if t['pnlPoints'] > 0]
+    losses = [t for t in trades if t['pnlPoints'] <= 0]
+    total_pnl = sum(t['pnlPoints'] for t in trades)
+    return {
+        "totalTrades": len(trades),
+        "wins": len(wins),
+        "losses": len(losses),
+        "winRate": round((len(wins) / len(trades)) * 100, 1),
+        "totalPnlPoints": round(total_pnl, 2),
+        "avgPnlPoints": round(total_pnl / len(trades), 2),
+        "targetHits": sum(1 for t in trades if t['status'] == 'TARGET_HIT'),
+        "stopOuts": sum(1 for t in trades if t['status'] == 'STOPPED_OUT'),
+        "eodCloses": sum(1 for t in trades if t['status'] == 'EOD_CLOSE')
+    }
 
 def _compute_journal_stats(trades):
     """Win rate / totals for a list of journal entries (already filtered/sorted by caller)."""
@@ -1214,6 +1609,71 @@ def get_signal_log():
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'healthy'})
+
+def _resolve_symbols_param(raw):
+    v = str(raw or 'all').strip().lower()
+    if v in ('nifty', 'nifty50', 'nifty 50', '^nsei'):
+        return ['^NSEI']
+    if v in ('banknifty', 'bank_nifty', 'bank nifty', '^nsebank'):
+        return ['^NSEBANK']
+    return ['^NSEI', '^NSEBANK']
+
+@app.route('/api/history/sync', methods=['GET', 'POST'])
+def sync_history():
+    """
+    Fetch the 5m history Yahoo currently has and merge it into the GitHub-backed
+    archive for the requested symbol(s). Call this periodically (e.g. once after
+    market close) so the archive accumulates past Yahoo's ~60-day retention.
+    """
+    if not github_configured():
+        return jsonify({
+            'error': 'GitHub storage is not configured on the server',
+            'details': 'Set GITHUB_TOKEN, GITHUB_REPO (and optionally GITHUB_BRANCH, GITHUB_DATA_DIR) as environment variables.'
+        }), 400
+
+    symbols = _resolve_symbols_param(request.args.get('symbol', 'all'))
+    results = [sync_5m_history_to_github(sym) for sym in symbols]
+    return jsonify({'results': results, 'timestamp': now_ist().isoformat()})
+
+@app.route('/api/history/status', methods=['GET'])
+def history_status():
+    """Read-only view of what's currently archived in GitHub, without fetching anything new."""
+    symbols = _resolve_symbols_param(request.args.get('symbol', 'all'))
+    results = []
+    for sym in symbols:
+        if not github_configured():
+            results.append({'symbol': sym, 'symbolLabel': SYMBOL_LABELS.get(sym, sym), 'configured': False})
+            continue
+        df = load_5m_history(sym)
+        if df is None or len(df) == 0:
+            results.append({'symbol': sym, 'symbolLabel': SYMBOL_LABELS.get(sym, sym), 'configured': True, 'rows': 0})
+            continue
+        trading_days = pd.Series(df.index.date).nunique()
+        results.append({
+            'symbol': sym, 'symbolLabel': SYMBOL_LABELS.get(sym, sym), 'configured': True,
+            'rows': int(len(df)), 'tradingDays': int(trading_days),
+            'from': df.index[0].strftime('%Y-%m-%d'), 'to': df.index[-1].strftime('%Y-%m-%d')
+        })
+    return jsonify({'symbols': results, 'retentionDays': HISTORY_RETENTION_DAYS, 'timestamp': now_ist().isoformat()})
+
+@app.route('/api/backtest', methods=['GET'])
+def get_backtest():
+    """
+    Run the opening-range breakout backtest (see run_backtest docstring) over
+    the archived (or, if unavailable, live max-60-day) 5m history.
+    """
+    try:
+        symbol = _resolve_symbols_param(request.args.get('symbol', 'nifty'))[0]
+        try:
+            days = max(1, min(HISTORY_RETENTION_DAYS, int(request.args.get('days', HISTORY_RETENTION_DAYS))))
+        except (TypeError, ValueError):
+            days = HISTORY_RETENTION_DAYS
+        result = run_backtest(symbol, days=days)
+        result['timestamp'] = now_ist().isoformat()
+        return jsonify(result)
+    except Exception as e:
+        logger.exception("Backtest handler exception")
+        return jsonify({'error': 'Backtest failed', 'details': str(e)}), 500
 
 @app.route('/', methods=['GET'])
 def home():
