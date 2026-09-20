@@ -763,7 +763,7 @@
         .journal-pnl.positive { color:#34d399; font-weight:700; }
         .journal-pnl.negative { color:#f87171; font-weight:700; }
         .journal-empty { color:#94a3b8; padding:20px; text-align:center; font-size:13px; }
-        @media (max-width:700px){ .journal-stats{grid-template-columns:repeat(3,minmax(0,1fr))} .journal-stat:nth-child(4),.journal-stat:nth-child(5){display:none} }
+        @media (max-width:700px){ .journal-stats{grid-template-columns:repeat(3,minmax(0,1fr))} .journal-stat:nth-child(4),.journal-stat:nth-child(5){display:none} #backtestStats{grid-template-columns:repeat(4,minmax(0,1fr))!important} #backtestStats .journal-stat{display:block!important} }
 
     </style>
 <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
@@ -1005,12 +1005,15 @@
                     <button class="journal-refresh-btn" onclick="runBacktest()">Run Backtest</button>
                 </div>
 
-                <div class="journal-stats" id="backtestStats">
-                    <div class="journal-stat"><span>Trades</span><strong id="btStatTotal">--</strong></div>
+                <div class="journal-stats" id="backtestStats" style="grid-template-columns:repeat(8,minmax(0,1fr));">
+                    <div class="journal-stat"><span>Days</span><strong id="btStatDays">--</strong></div>
+                    <div class="journal-stat"><span>Setups</span><strong id="btStatSetups">--</strong></div>
+                    <div class="journal-stat"><span>Closed</span><strong id="btStatClosed">--</strong></div>
+                    <div class="journal-stat"><span>Wins</span><strong id="btStatWins">--</strong></div>
+                    <div class="journal-stat"><span>Losses</span><strong id="btStatLosses">--</strong></div>
                     <div class="journal-stat"><span>Win Rate</span><strong id="btStatWinRate">--</strong></div>
                     <div class="journal-stat"><span>Total P&L</span><strong id="btStatPnl">--</strong></div>
-                    <div class="journal-stat"><span>Avg P&L</span><strong id="btStatAvgPnl">--</strong></div>
-                    <div class="journal-stat"><span>Target/Stop</span><strong id="btStatHits">--</strong></div>
+                    <div class="journal-stat"><span>Avg R:R</span><strong id="btStatAvgRR">--</strong></div>
                 </div>
                 <div id="backtestNote" style="font-size:12px;color:#94a3b8;margin-bottom:10px;"></div>
 
@@ -1019,14 +1022,14 @@
                         <thead>
                             <tr>
                                 <th>Date</th>
-                                <th>Signal</th>
-                                <th>Entry Time</th>
+                                <th>Global</th>
+                                <th>1st 5m</th>
                                 <th>Entry</th>
-                                <th>Stop Loss</th>
+                                <th>Stop</th>
                                 <th>Target</th>
-                                <th>Exit Time</th>
+                                <th>R:R</th>
                                 <th>Exit</th>
-                                <th>Status</th>
+                                <th>Outcome</th>
                                 <th>P&L</th>
                             </tr>
                         </thead>
@@ -1542,25 +1545,31 @@ function setConnection(connected, message) {
             if (!body) return;
 
             const stats = data.stats || {};
-            const totalEl = document.getElementById('btStatTotal');
-            const winEl = document.getElementById('btStatWinRate');
+            const daysEl = document.getElementById('btStatDays');
+            const setupsEl = document.getElementById('btStatSetups');
+            const closedEl = document.getElementById('btStatClosed');
+            const winsEl = document.getElementById('btStatWins');
+            const lossesEl = document.getElementById('btStatLosses');
+            const winRateEl = document.getElementById('btStatWinRate');
             const pnlEl = document.getElementById('btStatPnl');
-            const avgEl = document.getElementById('btStatAvgPnl');
-            const hitsEl = document.getElementById('btStatHits');
+            const avgRREl = document.getElementById('btStatAvgRR');
 
-            if (totalEl) totalEl.textContent = stats.totalTrades ?? '--';
-            if (winEl) winEl.textContent = (stats.winRate !== undefined) ? `${stats.winRate}%` : '--';
+            if (daysEl) daysEl.textContent = data.daysAnalyzed ?? '--';
+            if (setupsEl) setupsEl.textContent = data.setupsIdentified ?? '--';
+            if (closedEl) closedEl.textContent = stats.totalTrades ?? '--';
+            if (winsEl) winsEl.textContent = stats.wins ?? '--';
+            if (lossesEl) lossesEl.textContent = stats.losses ?? '--';
+            if (winRateEl) winRateEl.textContent = (stats.winRate !== undefined) ? `${stats.winRate}%` : '--';
             if (pnlEl) {
                 const p = stats.totalPnlPoints;
                 pnlEl.textContent = (p !== undefined) ? `${p > 0 ? '+' : ''}${p}` : '--';
                 pnlEl.className = p > 0 ? 'positive' : (p < 0 ? 'negative' : '');
             }
-            if (avgEl) {
-                const a = stats.avgPnlPoints;
-                avgEl.textContent = (a !== undefined) ? `${a > 0 ? '+' : ''}${a}` : '--';
-                avgEl.className = a > 0 ? 'positive' : (a < 0 ? 'negative' : '');
+            if (avgRREl) {
+                const a = stats.avgRiskReward;
+                avgRREl.textContent = (a !== undefined && a !== null) ? `${a > 0 ? '+' : ''}${a}R` : '--';
+                avgRREl.className = a > 0 ? 'positive' : (a < 0 ? 'negative' : '');
             }
-            if (hitsEl) hitsEl.textContent = `${stats.targetHits ?? 0} / ${stats.stopOuts ?? 0}`;
 
             if (note) {
                 const bits = [];
@@ -1577,24 +1586,27 @@ function setConnection(connected, message) {
             }
 
             body.innerHTML = trades.map(t => {
-                const sig = safeUpper(t.signal) === 'SELL' ? 'sell' : 'buy';
                 const st = journalStatusInfo(t.status);
                 const pnl = t.pnlPoints;
                 const pnlText = (pnl === null || pnl === undefined) ? '--' : `${pnl > 0 ? '+' : ''}${pnl}`;
                 const pnlCls = (pnl > 0) ? 'positive' : (pnl < 0 ? 'negative' : '');
+                const globalCls = safeUpper(t.globalStatus) === 'BEARISH' ? 'sell' : 'buy';
+                const candleCls = safeUpper(t.firstCandle) === 'RED' ? 'sell' : 'buy';
+                const rr = (t.riskReward !== undefined && t.riskReward !== null) ? `${t.riskReward > 0 ? '+' : ''}${t.riskReward}R` : '--';
                 return `
                     <tr>
                         <td>${safeString(t.date, '--')}</td>
-                        <td><span class="journal-signal-badge ${sig}">${safeUpper(t.signal)}</span></td>
-                        <td>${t.entryTime ?? '--'}</td>
+                        <td><span class="journal-signal-badge ${globalCls}">${safeUpper(t.globalStatus)}</span></td>
+                        <td><span class="journal-signal-badge ${candleCls}">${safeUpper(t.firstCandle)}</span></td>
                         <td>${t.entry ?? '--'}</td>
                         <td>${t.stopLoss ?? '--'}</td>
                         <td>${t.target ?? '--'}</td>
-                        <td>${t.exitTime ?? '--'}</td>
+                        <td>${rr}</td>
                         <td>${t.exitPrice ?? '--'}</td>
                         <td><span class="journal-status-badge ${st.cls}">${st.label}</span></td>
                         <td class="journal-pnl ${pnlCls}">${pnlText}</td>
                     </tr>`;
+
             }).join('');
         }
 
