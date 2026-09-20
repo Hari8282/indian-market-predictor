@@ -983,6 +983,59 @@
                     </table>
                 </div>
             </div>
+
+            <!-- 100-Day 5-min History Archive + Opening-Range Breakout Backtest -->
+            <div class="journal-section">
+                <div class="journal-header">
+                    <div class="journal-title">🧪 Strategy Backtest — 5m History</div>
+                    <button class="journal-refresh-btn" onclick="syncHistory()">Sync History to GitHub</button>
+                </div>
+                <div id="historyStatusLine" style="font-size:12px;color:#94a3b8;margin-bottom:12px;">Checking archived history...</div>
+
+                <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
+                    <select id="backtestSymbol" style="background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px 10px;font-size:12px;">
+                        <option value="nifty">NIFTY 50</option>
+                        <option value="banknifty">BANK NIFTY</option>
+                    </select>
+                    <select id="backtestDays" style="background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px 10px;font-size:12px;">
+                        <option value="30">Last 30 days</option>
+                        <option value="60">Last 60 days</option>
+                        <option value="100" selected>Last 100 days</option>
+                    </select>
+                    <button class="journal-refresh-btn" onclick="runBacktest()">Run Backtest</button>
+                </div>
+
+                <div class="journal-stats" id="backtestStats">
+                    <div class="journal-stat"><span>Trades</span><strong id="btStatTotal">--</strong></div>
+                    <div class="journal-stat"><span>Win Rate</span><strong id="btStatWinRate">--</strong></div>
+                    <div class="journal-stat"><span>Total P&L</span><strong id="btStatPnl">--</strong></div>
+                    <div class="journal-stat"><span>Avg P&L</span><strong id="btStatAvgPnl">--</strong></div>
+                    <div class="journal-stat"><span>Target/Stop</span><strong id="btStatHits">--</strong></div>
+                </div>
+                <div id="backtestNote" style="font-size:12px;color:#94a3b8;margin-bottom:10px;"></div>
+
+                <div class="journal-table-wrap">
+                    <table class="journal-table" id="backtestTable">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Signal</th>
+                                <th>Entry Time</th>
+                                <th>Entry</th>
+                                <th>Stop Loss</th>
+                                <th>Target</th>
+                                <th>Exit Time</th>
+                                <th>Exit</th>
+                                <th>Status</th>
+                                <th>P&L</th>
+                            </tr>
+                        </thead>
+                        <tbody id="backtestTableBody">
+                            <tr><td colspan="10" class="journal-empty">Choose a symbol/range and click "Run Backtest".</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1058,6 +1111,21 @@ function getApiUrl() {
 function getSignalLogUrl() {
     const base = normalizeApiBase(API_BASE_URL);
     return `${base}/api/signal-log?symbol=all&limit=100`;
+}
+
+function getHistoryStatusUrl() {
+    const base = normalizeApiBase(API_BASE_URL);
+    return `${base}/api/history/status?symbol=all`;
+}
+
+function getHistorySyncUrl() {
+    const base = normalizeApiBase(API_BASE_URL);
+    return `${base}/api/history/sync?symbol=all`;
+}
+
+function getBacktestUrl(symbol, days) {
+    const base = normalizeApiBase(API_BASE_URL);
+    return `${base}/api/backtest?symbol=${encodeURIComponent(symbol)}&days=${encodeURIComponent(days)}`;
 }
 
 function setConnection(connected, message) {
@@ -1351,6 +1419,7 @@ function setConnection(connected, message) {
                 case 'TARGET_HIT': return { label: 'TARGET HIT', cls: 'target' };
                 case 'STOPPED_OUT': return { label: 'STOPPED OUT', cls: 'stopped' };
                 case 'CLOSED_SIGNAL_CHANGE': return { label: 'CLOSED', cls: 'changed' };
+                case 'EOD_CLOSE': return { label: 'EOD CLOSE', cls: 'changed' };
                 default: return { label: safeUpper(status) || '--', cls: 'changed' };
             }
         }
@@ -1411,6 +1480,119 @@ function setConnection(connected, message) {
                         <td>${(t.riskReward !== undefined && t.riskReward !== null) ? `1:${t.riskReward}` : '--'}</td>
                         <td><span class="journal-status-badge ${st.cls}">${st.label}</span></td>
                         <td>${t.exitPrice ?? '--'}</td>
+                        <td class="journal-pnl ${pnlCls}">${pnlText}</td>
+                    </tr>`;
+            }).join('');
+        }
+
+        // ---- 5m History Archive (GitHub) + Strategy Backtest ----
+        async function fetchHistoryStatus() {
+            const line = document.getElementById('historyStatusLine');
+            try {
+                const res = await fetch(getHistoryStatusUrl());
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                const parts = (data.symbols || []).map(s => {
+                    if (!s.configured) return `${s.symbolLabel}: GitHub storage not configured`;
+                    if (!s.rows) return `${s.symbolLabel}: no history archived yet`;
+                    return `${s.symbolLabel}: ${s.rows} candles / ${s.tradingDays} days (${s.from} → ${s.to})`;
+                });
+                if (line) line.textContent = parts.join('   •   ') || 'No history status available.';
+            } catch (e) {
+                console.warn('History status fetch failed:', e);
+                if (line) line.textContent = 'Could not load history status — check backend connection.';
+            }
+        }
+
+        async function syncHistory() {
+            const line = document.getElementById('historyStatusLine');
+            if (line) line.textContent = 'Syncing 5m history to GitHub...';
+            try {
+                const res = await fetch(getHistorySyncUrl(), { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await fetchHistoryStatus();
+            } catch (e) {
+                console.warn('History sync failed:', e);
+                if (line) line.textContent = `Sync failed: ${e.message}`;
+            }
+        }
+
+        async function runBacktest() {
+            const symbol = document.getElementById('backtestSymbol')?.value || 'nifty';
+            const days = document.getElementById('backtestDays')?.value || '100';
+            const body = document.getElementById('backtestTableBody');
+            const note = document.getElementById('backtestNote');
+            if (body) body.innerHTML = '<tr><td colspan="10" class="journal-empty">Running backtest...</td></tr>';
+            if (note) note.textContent = '';
+            try {
+                const res = await fetch(getBacktestUrl(symbol, days));
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                renderBacktestResults(data);
+            } catch (e) {
+                console.warn('Backtest fetch failed:', e);
+                if (body) body.innerHTML = `<tr><td colspan="10" class="journal-empty">Backtest failed: ${e.message}</td></tr>`;
+            }
+        }
+
+        function renderBacktestResults(data) {
+            const body = document.getElementById('backtestTableBody');
+            const note = document.getElementById('backtestNote');
+            if (!body) return;
+
+            const stats = data.stats || {};
+            const totalEl = document.getElementById('btStatTotal');
+            const winEl = document.getElementById('btStatWinRate');
+            const pnlEl = document.getElementById('btStatPnl');
+            const avgEl = document.getElementById('btStatAvgPnl');
+            const hitsEl = document.getElementById('btStatHits');
+
+            if (totalEl) totalEl.textContent = stats.totalTrades ?? '--';
+            if (winEl) winEl.textContent = (stats.winRate !== undefined) ? `${stats.winRate}%` : '--';
+            if (pnlEl) {
+                const p = stats.totalPnlPoints;
+                pnlEl.textContent = (p !== undefined) ? `${p > 0 ? '+' : ''}${p}` : '--';
+                pnlEl.className = p > 0 ? 'positive' : (p < 0 ? 'negative' : '');
+            }
+            if (avgEl) {
+                const a = stats.avgPnlPoints;
+                avgEl.textContent = (a !== undefined) ? `${a > 0 ? '+' : ''}${a}` : '--';
+                avgEl.className = a > 0 ? 'positive' : (a < 0 ? 'negative' : '');
+            }
+            if (hitsEl) hitsEl.textContent = `${stats.targetHits ?? 0} / ${stats.stopOuts ?? 0}`;
+
+            if (note) {
+                const bits = [];
+                if (data.dataSource === 'live_fallback_max_60d') bits.push('Using live data (max ~60 days available — sync to GitHub to build a longer archive).');
+                if (data.dataSource === 'unavailable') bits.push(data.note || 'No data available.');
+                if (data.historyRange) bits.push(`Data range analyzed: ${data.historyRange.from} → ${data.historyRange.to} (${data.daysAnalyzed} days).`);
+                note.textContent = bits.join(' ');
+            }
+
+            const trades = Array.isArray(data.trades) ? data.trades : [];
+            if (trades.length === 0) {
+                body.innerHTML = '<tr><td colspan="10" class="journal-empty">No qualifying setups found in this range.</td></tr>';
+                return;
+            }
+
+            body.innerHTML = trades.map(t => {
+                const sig = safeUpper(t.signal) === 'SELL' ? 'sell' : 'buy';
+                const st = journalStatusInfo(t.status);
+                const pnl = t.pnlPoints;
+                const pnlText = (pnl === null || pnl === undefined) ? '--' : `${pnl > 0 ? '+' : ''}${pnl}`;
+                const pnlCls = (pnl > 0) ? 'positive' : (pnl < 0 ? 'negative' : '');
+                return `
+                    <tr>
+                        <td>${safeString(t.date, '--')}</td>
+                        <td><span class="journal-signal-badge ${sig}">${safeUpper(t.signal)}</span></td>
+                        <td>${t.entryTime ?? '--'}</td>
+                        <td>${t.entry ?? '--'}</td>
+                        <td>${t.stopLoss ?? '--'}</td>
+                        <td>${t.target ?? '--'}</td>
+                        <td>${t.exitTime ?? '--'}</td>
+                        <td>${t.exitPrice ?? '--'}</td>
+                        <td><span class="journal-status-badge ${st.cls}">${st.label}</span></td>
                         <td class="journal-pnl ${pnlCls}">${pnlText}</td>
                     </tr>`;
             }).join('');
@@ -1897,6 +2079,7 @@ function setConnection(connected, message) {
             
             fetchMarketData();
             fetchSignalLog();
+            fetchHistoryStatus();
         });
         
         window.addEventListener('resize', () => {
