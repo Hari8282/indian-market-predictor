@@ -135,10 +135,24 @@ SYMBOL_LABELS = {'^NSEI': 'NIFTY 50', '^NSEBANK': 'BANK NIFTY'}
 #   GITHUB_DATA_DIR  - folder inside the repo, defaults to "market_data"
 # ---------------------------------------------------------------------------
 GITHUB_API = "https://api.github.com"
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GITHUB_REPO = os.environ.get("GITHUB_REPO")
-GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
-GITHUB_DATA_DIR = os.environ.get("GITHUB_DATA_DIR", "market_data")
+
+def _clean_env(name, default=""):
+    """
+    Read an env var defensively: strips whitespace and stray leading/trailing
+    slashes, and falls back to `default` if the var is unset OR set-but-blank
+    (Render/other platforms let you "add" a var with an empty value, which
+    os.environ.get(..., default) would NOT catch since the key does exist).
+    """
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    val = val.strip().strip('/')
+    return val if val else default
+
+GITHUB_TOKEN = _clean_env("GITHUB_TOKEN", default=None) or None
+GITHUB_REPO = _clean_env("GITHUB_REPO", default=None) or None
+GITHUB_BRANCH = _clean_env("GITHUB_BRANCH", default="main")
+GITHUB_DATA_DIR = _clean_env("GITHUB_DATA_DIR", default="market_data")
 HISTORY_RETENTION_DAYS = 100
 HISTORY_SYMBOLS = {'^NSEI': 'NIFTY', '^NSEBANK': 'BANKNIFTY'}
 
@@ -149,8 +163,15 @@ def _github_headers():
     return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
 
 def _history_file_path(symbol):
+    """
+    Build a well-formed repo-relative path even if GITHUB_DATA_DIR is blank,
+    or was typed with stray slashes/whitespace: join only non-empty, slash-
+    stripped segments so the result never starts with "/" or contains "//"
+    (both of which GitHub's contents API rejects as a malformed path).
+    """
     name = HISTORY_SYMBOLS.get(symbol, symbol.replace('^', '').replace('/', '_'))
-    return f"{GITHUB_DATA_DIR}/{name}_5m.csv"
+    segments = [s.strip().strip('/') for s in (GITHUB_DATA_DIR, f"{name}_5m.csv")]
+    return "/".join(s for s in segments if s)
 
 def github_get_file(path):
     """Return (content_str, sha) for an existing repo file, or (None, None) if absent/unconfigured."""
@@ -454,7 +475,7 @@ def run_backtest(symbol, days=100, min_rr=2.0):
     if intraday is None or len(intraday) == 0:
         return {
             "symbol": symbol, "trades": [], "stats": _backtest_stats([]),
-            "daysAnalyzed": 0, "dataSource": "unavailable",
+            "daysAnalyzed": 0, "setupsIdentified": 0, "dataSource": "unavailable",
             "note": "No 5m history available yet. Run /api/history/sync first (requires GITHUB_TOKEN/GITHUB_REPO), or wait for the live fallback to have data."
         }
 
@@ -463,7 +484,7 @@ def run_backtest(symbol, days=100, min_rr=2.0):
     if len(intraday) == 0:
         return {
             "symbol": symbol, "trades": [], "stats": _backtest_stats([]),
-            "daysAnalyzed": 0, "dataSource": data_source,
+            "daysAnalyzed": 0, "setupsIdentified": 0, "dataSource": data_source,
             "note": "No candles fall within the requested day range."
         }
 
@@ -471,6 +492,7 @@ def run_backtest(symbol, days=100, min_rr=2.0):
     global_daily = fetch_global_daily_history()
 
     trades = []
+    setups_identified = 0
     trading_dates = sorted(set(intraday.index.date))
 
     for i, d in enumerate(trading_dates):
@@ -496,9 +518,11 @@ def run_backtest(symbol, days=100, min_rr=2.0):
         first_red = float(first['Close']) < float(first['Open'])
         above_tc = float(first['Close']) > tc
         below_bc = float(first['Close']) < bc
+        first_candle_label = 'green' if first_green else ('red' if first_red else 'flat')
 
         trade = None
         if global_status == 'bullish' and first_green and above_tc:
+            setups_identified += 1
             trigger = rest[rest['Close'] > float(first['High'])]
             if len(trigger):
                 entry_row = trigger.iloc[0]
@@ -508,9 +532,10 @@ def run_backtest(symbol, days=100, min_rr=2.0):
                 risk = entry - stop
                 if risk > 0:
                     target = round(entry + risk * min_rr, 2)
-                    trade = _simulate_trade(day_candles, entry_time, 'BUY', entry, stop, target, risk, min_rr, d)
+                    trade = _simulate_trade(day_candles, entry_time, 'BUY', entry, stop, target, risk, d, global_status, first_candle_label)
 
         elif global_status == 'bearish' and first_red and below_bc:
+            setups_identified += 1
             trigger = rest[rest['Close'] < float(first['Low'])]
             if len(trigger):
                 entry_row = trigger.iloc[0]
@@ -520,7 +545,7 @@ def run_backtest(symbol, days=100, min_rr=2.0):
                 risk = stop - entry
                 if risk > 0:
                     target = round(entry - risk * min_rr, 2)
-                    trade = _simulate_trade(day_candles, entry_time, 'SELL', entry, stop, target, risk, min_rr, d)
+                    trade = _simulate_trade(day_candles, entry_time, 'SELL', entry, stop, target, risk, d, global_status, first_candle_label)
 
         if trade:
             trades.append(trade)
@@ -531,6 +556,7 @@ def run_backtest(symbol, days=100, min_rr=2.0):
         "trades": trades,
         "stats": _backtest_stats(trades),
         "daysAnalyzed": len(trading_dates) - 1,
+        "setupsIdentified": setups_identified,
         "dataSource": data_source,
         "historyRange": {
             "from": intraday.index[0].strftime('%Y-%m-%d'),
@@ -538,7 +564,7 @@ def run_backtest(symbol, days=100, min_rr=2.0):
         }
     }
 
-def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, min_rr, trade_date):
+def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, trade_date, global_status, first_candle_label):
     """Walk forward through the rest of the day's candles to find the exit."""
     after_entry = day_candles[day_candles.index > entry_time]
     exit_price, exit_reason, exit_time = None, 'EOD_CLOSE', None
@@ -565,17 +591,20 @@ def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, 
         exit_time = day_candles.index[-1]
 
     pnl = (exit_price - entry) if signal == 'BUY' else (entry - exit_price)
+    achieved_rr = round(pnl / risk, 2) if risk else 0.0
 
     return {
         "date": trade_date.strftime('%Y-%m-%d'),
         "signal": signal,
+        "globalStatus": global_status,
+        "firstCandle": first_candle_label,
         "entryTime": entry_time.strftime('%H:%M'),
         "exitTime": exit_time.strftime('%H:%M') if exit_time is not None else None,
         "entry": round(entry, 2),
         "stopLoss": round(stop, 2),
         "target": round(target, 2),
         "exitPrice": round(exit_price, 2),
-        "riskReward": round(min_rr, 2),
+        "riskReward": achieved_rr,
         "status": exit_reason,
         "pnlPoints": round(pnl, 2)
     }
@@ -584,11 +613,13 @@ def _backtest_stats(trades):
     if not trades:
         return {
             "totalTrades": 0, "wins": 0, "losses": 0, "winRate": 0.0,
-            "totalPnlPoints": 0.0, "avgPnlPoints": 0.0, "targetHits": 0, "stopOuts": 0, "eodCloses": 0
+            "totalPnlPoints": 0.0, "avgPnlPoints": 0.0, "avgRiskReward": 0.0,
+            "targetHits": 0, "stopOuts": 0, "eodCloses": 0
         }
     wins = [t for t in trades if t['pnlPoints'] > 0]
     losses = [t for t in trades if t['pnlPoints'] <= 0]
     total_pnl = sum(t['pnlPoints'] for t in trades)
+    rr_values = [t['riskReward'] for t in trades if isinstance(t.get('riskReward'), (int, float))]
     return {
         "totalTrades": len(trades),
         "wins": len(wins),
@@ -596,6 +627,7 @@ def _backtest_stats(trades):
         "winRate": round((len(wins) / len(trades)) * 100, 1),
         "totalPnlPoints": round(total_pnl, 2),
         "avgPnlPoints": round(total_pnl / len(trades), 2),
+        "avgRiskReward": round(sum(rr_values) / len(rr_values), 2) if rr_values else 0.0,
         "targetHits": sum(1 for t in trades if t['status'] == 'TARGET_HIT'),
         "stopOuts": sum(1 for t in trades if t['status'] == 'STOPPED_OUT'),
         "eodCloses": sum(1 for t in trades if t['status'] == 'EOD_CLOSE')
