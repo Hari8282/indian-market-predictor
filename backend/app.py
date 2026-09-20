@@ -450,18 +450,26 @@ def _daily_ohlc_from_5m(intraday_df):
     )
     return daily
 
-def run_backtest(symbol, days=100, min_rr=2.0):
+ENTRY_RANGE_FRACTION = 0.55  # entry triggers once price closes beyond this fraction of the 1st candle's range
+
+def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTION):
     """
     Backtest the opening-range breakout strategy over the archived 5m history:
 
       BUY  -> global market status bullish AND the day's 1st 5m candle is green
               AND its close is above the day's CPR TC, THEN the first later
-              candle whose close breaks above the 1st candle's high triggers
-              entry. Stop = 1st candle's low. Target = entry + risk * min_rr
-              (the same minimum 1:2 reward:risk the live strategy enforces).
+              candle whose CLOSE breaks above a level `entry_fraction` of the
+              way up the 1st candle's range triggers entry:
+                entry_level = first_low + entry_fraction * (first_high - first_low)
+              (entry_fraction=0.55 means 55% up from the 1st candle's low to
+              its high). Stop = 1st candle's low. Target = entry + risk *
+              min_rr (the same minimum 1:2 reward:risk the live strategy
+              enforces).
 
       SELL -> the mirror image: bearish global status, red 1st candle below
-              CPR BC, entry on a later close breaking below the 1st candle's low.
+              CPR BC, entry once a later candle's close drops below the
+              mirrored level:
+                entry_level = first_high - entry_fraction * (first_high - first_low)
 
     Only one trade is taken per day (the first qualifying breakout); if
     neither target nor stop is hit by the day's last candle, the trade is
@@ -513,22 +521,27 @@ def run_backtest(symbol, days=100, min_rr=2.0):
         first = day_candles.iloc[0]
         rest = day_candles.iloc[1:]
         global_status = historical_global_status(global_daily, d)
+        first_close = float(first['Close'])
+        first_high = float(first['High'])
+        first_low = float(first['Low'])
+        first_range = first_high - first_low
 
-        first_green = float(first['Close']) > float(first['Open'])
-        first_red = float(first['Close']) < float(first['Open'])
-        above_tc = float(first['Close']) > tc
-        below_bc = float(first['Close']) < bc
+        first_green = first_close > float(first['Open'])
+        first_red = first_close < float(first['Open'])
+        above_tc = first_close > tc
+        below_bc = first_close < bc
         first_candle_label = 'green' if first_green else ('red' if first_red else 'flat')
 
         trade = None
         if global_status == 'bullish' and first_green and above_tc:
             setups_identified += 1
-            trigger = rest[rest['Close'] > float(first['High'])]
+            entry_level = first_low + entry_fraction * first_range
+            trigger = rest[rest['Close'] > entry_level]
             if len(trigger):
                 entry_row = trigger.iloc[0]
                 entry_time = trigger.index[0]
                 entry = float(entry_row['Close'])
-                stop = float(first['Low'])
+                stop = first_low
                 risk = entry - stop
                 if risk > 0:
                     target = round(entry + risk * min_rr, 2)
@@ -536,12 +549,13 @@ def run_backtest(symbol, days=100, min_rr=2.0):
 
         elif global_status == 'bearish' and first_red and below_bc:
             setups_identified += 1
-            trigger = rest[rest['Close'] < float(first['Low'])]
+            entry_level = first_high - entry_fraction * first_range
+            trigger = rest[rest['Close'] < entry_level]
             if len(trigger):
                 entry_row = trigger.iloc[0]
                 entry_time = trigger.index[0]
                 entry = float(entry_row['Close'])
-                stop = float(first['High'])
+                stop = first_high
                 risk = stop - entry
                 if risk > 0:
                     target = round(entry - risk * min_rr, 2)
@@ -558,6 +572,7 @@ def run_backtest(symbol, days=100, min_rr=2.0):
         "daysAnalyzed": len(trading_dates) - 1,
         "setupsIdentified": setups_identified,
         "dataSource": data_source,
+        "entryRangeFraction": entry_fraction,
         "historyRange": {
             "from": intraday.index[0].strftime('%Y-%m-%d'),
             "to": intraday.index[-1].strftime('%Y-%m-%d')
@@ -1700,7 +1715,12 @@ def get_backtest():
             days = max(1, min(HISTORY_RETENTION_DAYS, int(request.args.get('days', HISTORY_RETENTION_DAYS))))
         except (TypeError, ValueError):
             days = HISTORY_RETENTION_DAYS
-        result = run_backtest(symbol, days=days)
+        try:
+            entry_fraction = request.args.get('entryFraction')
+            entry_fraction = max(0.0, min(1.0, float(entry_fraction))) if entry_fraction is not None else ENTRY_RANGE_FRACTION
+        except (TypeError, ValueError):
+            entry_fraction = ENTRY_RANGE_FRACTION
+        result = run_backtest(symbol, days=days, entry_fraction=entry_fraction)
         result['timestamp'] = now_ist().isoformat()
         return jsonify(result)
     except Exception as e:
