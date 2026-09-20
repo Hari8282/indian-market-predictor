@@ -451,8 +451,31 @@ def _daily_ohlc_from_5m(intraday_df):
     return daily
 
 ENTRY_RANGE_FRACTION = 0.55  # entry triggers once price closes beyond this fraction of the 1st candle's range
+STOP_LOSS_BUFFER_POINTS = 20  # fixed-point buffer added to the entry candle's low/high for stop candidate #1
 
-def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTION):
+def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_points=STOP_LOSS_BUFFER_POINTS):
+    """
+    Two stop-loss candidates are computed, and whichever gives the SMALLER
+    risk (i.e. sits closer to entry) is used:
+      1. the entry candle's own low, minus a fixed point buffer (BUY) /
+         its high, plus a fixed point buffer (SELL)
+      2. the day's CPR BC (BUY) / TC (SELL) -- a close back through this
+         level would invalidate the setup, so it doubles as a structural stop
+
+    A candidate only counts if it's actually on the correct side of entry
+    (i.e. it would produce positive risk); if neither candidate is valid,
+    returns None and the trade is skipped.
+    """
+    if signal == 'BUY':
+        candidates = [float(entry_row['Low']) - buffer_points, bc]
+        valid = [c for c in candidates if c < entry]
+        return max(valid) if valid else None
+    else:
+        candidates = [float(entry_row['High']) + buffer_points, tc]
+        valid = [c for c in candidates if c > entry]
+        return min(valid) if valid else None
+
+def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTION, stop_buffer=STOP_LOSS_BUFFER_POINTS):
     """
     Backtest the opening-range breakout strategy over the archived 5m history:
 
@@ -462,14 +485,19 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTI
               way up the 1st candle's range triggers entry:
                 entry_level = first_low + entry_fraction * (first_high - first_low)
               (entry_fraction=0.55 means 55% up from the 1st candle's low to
-              its high). Stop = 1st candle's low. Target = entry + risk *
-              min_rr (the same minimum 1:2 reward:risk the live strategy
-              enforces).
+              its high).
+
+              Stop loss is the TIGHTER (minimum-risk) of two candidates (see
+              _choose_stop_loss): the entry candle's low minus `stop_buffer`
+              points, or the day's CPR BC -- whichever is closer to entry.
+              Target = entry + risk * min_rr (the same minimum 1:2
+              reward:risk the live strategy enforces).
 
       SELL -> the mirror image: bearish global status, red 1st candle below
               CPR BC, entry once a later candle's close drops below the
               mirrored level:
                 entry_level = first_high - entry_fraction * (first_high - first_low)
+              Stop is the tighter of (entry candle's high + stop_buffer) or CPR TC.
 
     Only one trade is taken per day (the first qualifying breakout); if
     neither target nor stop is hit by the day's last candle, the trade is
@@ -541,11 +569,12 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTI
                 entry_row = trigger.iloc[0]
                 entry_time = trigger.index[0]
                 entry = float(entry_row['Close'])
-                stop = first_low
-                risk = entry - stop
-                if risk > 0:
-                    target = round(entry + risk * min_rr, 2)
-                    trade = _simulate_trade(day_candles, entry_time, 'BUY', entry, stop, target, risk, d, global_status, first_candle_label)
+                stop = _choose_stop_loss('BUY', entry, entry_row, bc, tc, stop_buffer)
+                if stop is not None:
+                    risk = entry - stop
+                    if risk > 0:
+                        target = round(entry + risk * min_rr, 2)
+                        trade = _simulate_trade(day_candles, entry_time, 'BUY', entry, stop, target, risk, d, global_status, first_candle_label)
 
         elif global_status == 'bearish' and first_red and below_bc:
             setups_identified += 1
@@ -555,11 +584,12 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTI
                 entry_row = trigger.iloc[0]
                 entry_time = trigger.index[0]
                 entry = float(entry_row['Close'])
-                stop = first_high
-                risk = stop - entry
-                if risk > 0:
-                    target = round(entry - risk * min_rr, 2)
-                    trade = _simulate_trade(day_candles, entry_time, 'SELL', entry, stop, target, risk, d, global_status, first_candle_label)
+                stop = _choose_stop_loss('SELL', entry, entry_row, bc, tc, stop_buffer)
+                if stop is not None:
+                    risk = stop - entry
+                    if risk > 0:
+                        target = round(entry - risk * min_rr, 2)
+                        trade = _simulate_trade(day_candles, entry_time, 'SELL', entry, stop, target, risk, d, global_status, first_candle_label)
 
         if trade:
             trades.append(trade)
@@ -573,6 +603,7 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTI
         "setupsIdentified": setups_identified,
         "dataSource": data_source,
         "entryRangeFraction": entry_fraction,
+        "stopLossBufferPoints": stop_buffer,
         "historyRange": {
             "from": intraday.index[0].strftime('%Y-%m-%d'),
             "to": intraday.index[-1].strftime('%Y-%m-%d')
@@ -1720,7 +1751,12 @@ def get_backtest():
             entry_fraction = max(0.0, min(1.0, float(entry_fraction))) if entry_fraction is not None else ENTRY_RANGE_FRACTION
         except (TypeError, ValueError):
             entry_fraction = ENTRY_RANGE_FRACTION
-        result = run_backtest(symbol, days=days, entry_fraction=entry_fraction)
+        try:
+            stop_buffer = request.args.get('stopBuffer')
+            stop_buffer = max(0.0, float(stop_buffer)) if stop_buffer is not None else STOP_LOSS_BUFFER_POINTS
+        except (TypeError, ValueError):
+            stop_buffer = STOP_LOSS_BUFFER_POINTS
+        result = run_backtest(symbol, days=days, entry_fraction=entry_fraction, stop_buffer=stop_buffer)
         result['timestamp'] = now_ist().isoformat()
         return jsonify(result)
     except Exception as e:
