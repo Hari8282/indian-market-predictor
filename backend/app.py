@@ -450,11 +450,12 @@ def _daily_ohlc_from_5m(intraday_df):
     )
     return daily
 
-ENTRY_RANGE_FRACTION = 0.55  # entry triggers once price closes beyond this fraction of the 1st candle's range
+ENTRY_RANGE_MIN = 0.40  # lower bound of the entry candle close zone within the 1st candle's range
+ENTRY_RANGE_MAX = 0.60  # upper bound of the entry candle close zone within the 1st candle's range
 STOP_LOSS_BUFFER_POINTS = 20  # fixed-point buffer added to the entry candle's low/high for stop candidate #1
-TRAIL_TRIGGER_R = 1.5    # first trail step: move stop to entry after >1.5R
-TRAIL_LOCK_R = 1.0       # first lock is +0R (entry); subsequent steps lock +1R, +2R, ...
-EXTENDED_TARGET_R = 10.0 # safety cap; trailing stop is the real exit mechanism after 1.5R
+TRAIL_TRIGGER_R = 1.5    # once open profit reaches this many R, the trailing adjustment activates
+TRAIL_LOCK_R = 1.0       # stop is moved to lock in this many R of profit once triggered
+EXTENDED_TARGET_R = 3.0  # target is extended to this many R (from the original 2R) once the trail activates
 
 def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_points=STOP_LOSS_BUFFER_POINTS):
     """
@@ -478,29 +479,25 @@ def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_points=STOP_LOSS_
         valid = [c for c in candidates if c > entry]
         return min(valid) if valid else None
 
-def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTION, stop_buffer=STOP_LOSS_BUFFER_POINTS,
+def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=STOP_LOSS_BUFFER_POINTS,
                   trail_trigger_r=TRAIL_TRIGGER_R, trail_lock_r=TRAIL_LOCK_R, extended_target_r=EXTENDED_TARGET_R):
     """
     Backtest the opening-range breakout strategy over the archived 5m history:
 
       BUY  -> global market status bullish AND the day's 1st 5m candle is green
-              AND its close is above the day's CPR TC, THEN the first later
-              candle whose CLOSE breaks above a level `entry_fraction` of the
-              way up the 1st candle's range triggers entry:
-                entry_level = first_low + entry_fraction * (first_high - first_low)
-              (entry_fraction=0.55 means 55% up from the 1st candle's low to
-              its high).
+              AND its close is above the day's CPR TC. Then the first later
+              candle whose CLOSE falls between 40% and 60% of the 1st candle's range triggers entry.
 
               Stop loss is the TIGHTER (minimum-risk) of two candidates (see
               _choose_stop_loss): the entry candle's low minus `stop_buffer`
               points, or the day's CPR BC -- whichever is closer to entry.
-              Initial target = entry + risk * min_rr. During simulation the target becomes a safety cap
-              and the stepped trailing stop manages profit after 1.5R.
+              Target = entry + risk * min_rr (the same minimum 1:2
+              reward:risk the live strategy enforces).
 
       SELL -> the mirror image: bearish global status, red 1st candle below
-              CPR BC, entry once a later candle's close drops below the
-              mirrored level:
-                entry_level = first_high - entry_fraction * (first_high - first_low)
+              CPR BC. Then the first later candle whose CLOSE falls between
+              40% and 60% of the 1st candle's range measured down from the
+              high triggers entry.
               Stop is the tighter of (entry candle's high + stop_buffer) or CPR TC.
 
     Only one trade is taken per day (the first qualifying breakout); if
@@ -567,8 +564,9 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTI
         trade = None
         if global_status == 'bullish' and first_green and above_tc:
             setups_identified += 1
-            entry_level = first_low + entry_fraction * first_range
-            trigger = rest[rest['Close'] > entry_level]
+            entry_zone_low = first_low + ENTRY_RANGE_MIN * first_range
+            entry_zone_high = first_low + ENTRY_RANGE_MAX * first_range
+            trigger = rest[(rest['Close'] >= entry_zone_low) & (rest['Close'] <= entry_zone_high)]
             if len(trigger):
                 entry_row = trigger.iloc[0]
                 entry_time = trigger.index[0]
@@ -583,8 +581,9 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTI
 
         elif global_status == 'bearish' and first_red and below_bc:
             setups_identified += 1
-            entry_level = first_high - entry_fraction * first_range
-            trigger = rest[rest['Close'] < entry_level]
+            entry_zone_low = first_high - ENTRY_RANGE_MAX * first_range
+            entry_zone_high = first_high - ENTRY_RANGE_MIN * first_range
+            trigger = rest[(rest['Close'] >= entry_zone_low) & (rest['Close'] <= entry_zone_high)]
             if len(trigger):
                 entry_row = trigger.iloc[0]
                 entry_time = trigger.index[0]
@@ -608,16 +607,9 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=ENTRY_RANGE_FRACTI
         "daysAnalyzed": len(trading_dates) - 1,
         "setupsIdentified": setups_identified,
         "dataSource": data_source,
-        "entryRangeFraction": entry_fraction,
+        "entryRangeZone": {"min": ENTRY_RANGE_MIN, "max": ENTRY_RANGE_MAX},
         "stopLossBufferPoints": stop_buffer,
-        "trailing": {
-            "firstTriggerR": 1.5,
-            "firstStopR": 0.0,
-            "stepTriggerR": 2.0,
-            "stepSizeR": 1.0,
-            "rule": " >1.5R => 0R, >2R => +1R, >3R => +2R, >4R => +3R ...",
-            "safetyTargetR": max(float(extended_target_r), 10.0)
-        },
+        "trailing": {"triggerR": trail_trigger_r, "lockR": trail_lock_r, "extendedTargetR": extended_target_r},
         "historyRange": {
             "from": intraday.index[0].strftime('%Y-%m-%d'),
             "to": intraday.index[-1].strftime('%Y-%m-%d')
@@ -628,91 +620,51 @@ def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, 
                      global_status, first_candle_label,
                      trail_trigger_r=TRAIL_TRIGGER_R, trail_lock_r=TRAIL_LOCK_R, extended_target_r=EXTENDED_TARGET_R):
     """
-    Walk forward through the remaining candles using a step-wise R-multiple trail.
+    Walk forward through the rest of the day's candles to find the exit.
 
-    BUY example (risk = 1R):
-      >1.5R reached -> stop moves to Entry (0R)
-      >2.0R reached -> stop moves to +1R
-      >3.0R reached -> stop moves to +2R
-      >4.0R reached -> stop moves to +3R
-      ...and so on.
+    Trailing stop/target: once the trade's open profit reaches `trail_trigger_r`
+    R (checked off each candle's favorable extreme -- High for BUY, Low for
+    SELL), the stop is moved to lock in `trail_lock_r` R of profit and the
+    target is extended out to `extended_target_r` R, both measured off the
+    original entry risk. This is a single step adjustment (not a continuous
+    ratchet) and only ever moves the stop in the trade's favor.
 
-    SELL is the exact mirror image. The stop only moves in the trade's favour.
-    The original 2R target is not used as a hard exit after the first trail step;
-    otherwise the +1R trail at >2R could never become active. A high safety-cap
-    target is retained only to prevent an unbounded simulation. In normal use the
-    stepped trailing stop exits the trade first.
-
-    OHLC ambiguity is handled conservatively: for each candle the CURRENT stop is
-    checked before a new trail level is activated. This avoids assuming an
-    intrabar sequence that OHLC data cannot prove.
+    Within any one candle, the CURRENT stop is always checked before the
+    trail-trigger condition -- OHLC data can't tell us the exact intra-candle
+    order price touched levels in, so a candle can't both stop the trade out
+    and trail it; the conservative (stop-first) reading wins, same as the
+    non-trailing exit checks below.
     """
     after_entry = day_candles[day_candles.index > entry_time]
     exit_price, exit_reason, exit_time = None, 'EOD_CLOSE', None
-    current_stop = float(stop)
-    original_target = float(target) if target is not None else None
+    current_stop, current_target = stop, target
     trailed = False
-    trail_level_r = -1.0  # -1 means no trail yet; 0R = entry, 1R = +1R, 2R = +2R, ...
-    trail_events = []
-
-    # Keep a large safety target only; the step-wise stop controls exits after 1.5R.
-    if signal == 'BUY':
-        safety_target = entry + risk * max(float(extended_target_r), 10.0)
-    else:
-        safety_target = entry - risk * max(float(extended_target_r), 10.0)
 
     for t, row in after_entry.iterrows():
         high, low = float(row['High']), float(row['Low'])
 
-        # 1) Check the CURRENT stop first.
         if signal == 'BUY':
             if low <= current_stop:
-                exit_price, exit_reason, exit_time = current_stop, ('TRAIL_STOP' if trailed else 'STOPPED_OUT'), t
+                exit_price, exit_reason, exit_time = current_stop, ('TRAILED_STOP' if trailed else 'STOPPED_OUT'), t
                 break
+            if high >= current_target:
+                exit_price, exit_reason, exit_time = current_target, 'TARGET_HIT', t
+                break
+            if not trailed and risk > 0 and (high - entry) / risk >= trail_trigger_r:
+                current_stop = entry + trail_lock_r * risk
+                current_target = entry + extended_target_r * risk
+                trailed = True
         else:
             if high >= current_stop:
-                exit_price, exit_reason, exit_time = current_stop, ('TRAIL_STOP' if trailed else 'STOPPED_OUT'), t
+                exit_price, exit_reason, exit_time = current_stop, ('TRAILED_STOP' if trailed else 'STOPPED_OUT'), t
                 break
-
-        # 2) Determine the highest whole-R trail level reached by this candle.
-        if risk > 0:
-            if signal == 'BUY':
-                favorable_r = (high - entry) / risk
-            else:
-                favorable_r = (entry - low) / risk
-
-            if favorable_r > trail_trigger_r:
-                # 1.5R -> 0R stop; >2R -> +1R; >3R -> +2R; etc.
-                # At exactly 2R the next step is intentionally not activated;
-                # the requested rule says price must be >2R.
-                if favorable_r > 2.0:
-                    new_level = int(np.floor(favorable_r - 1e-9)) - 1
-                    new_level = max(0, new_level)
-                else:
-                    new_level = 0
-
-                if new_level > trail_level_r:
-                    trail_level_r = new_level
-                    new_stop = entry + trail_level_r * risk if signal == 'BUY' else entry - trail_level_r * risk
-                    if (signal == 'BUY' and new_stop > current_stop) or (signal == 'SELL' and new_stop < current_stop):
-                        current_stop = new_stop
-                        trailed = True
-                        trail_events.append({
-                            'time': t.strftime('%H:%M'),
-                            'favorableR': round(float(favorable_r), 2),
-                            'stopR': round(float(trail_level_r), 2),
-                            'stop': round(float(current_stop), 2)
-                        })
-
-        # 3) Safety cap only. The original 2R target is no longer a hard exit.
-        if signal == 'BUY':
-            if high >= safety_target:
-                exit_price, exit_reason, exit_time = safety_target, 'SAFETY_TARGET_HIT', t
+            if low <= current_target:
+                exit_price, exit_reason, exit_time = current_target, 'TARGET_HIT', t
                 break
-        else:
-            if low <= safety_target:
-                exit_price, exit_reason, exit_time = safety_target, 'SAFETY_TARGET_HIT', t
-                break
+            if not trailed and risk > 0 and (entry - low) / risk >= trail_trigger_r:
+                current_stop = entry - trail_lock_r * risk
+                current_target = entry - extended_target_r * risk
+                trailed = True
 
     if exit_price is None:
         exit_price = float(day_candles.iloc[-1]['Close'])
@@ -730,15 +682,12 @@ def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, 
         "exitTime": exit_time.strftime('%H:%M') if exit_time is not None else None,
         "entry": round(entry, 2),
         "stopLoss": round(current_stop, 2),
-        "initialStopLoss": round(stop, 2),
-        "target": round(original_target, 2) if original_target is not None else None,
+        "target": round(current_target, 2),
         "exitPrice": round(exit_price, 2),
         "riskReward": achieved_rr,
         "status": exit_reason,
         "pnlPoints": round(pnl, 2),
-        "trailed": trailed,
-        "trailStopR": round(float(trail_level_r), 2),
-        "trailEvents": trail_events
+        "trailed": trailed
     }
 
 def _backtest_stats(trades):
@@ -1835,9 +1784,9 @@ def get_backtest():
             days = HISTORY_RETENTION_DAYS
         try:
             entry_fraction = request.args.get('entryFraction')
-            entry_fraction = max(0.0, min(1.0, float(entry_fraction))) if entry_fraction is not None else ENTRY_RANGE_FRACTION
+            entry_fraction = max(0.0, min(1.0, float(entry_fraction))) if entry_fraction is not None else None
         except (TypeError, ValueError):
-            entry_fraction = ENTRY_RANGE_FRACTION
+            entry_fraction = None
         try:
             stop_buffer = request.args.get('stopBuffer')
             stop_buffer = max(0.0, float(stop_buffer)) if stop_buffer is not None else STOP_LOSS_BUFFER_POINTS
