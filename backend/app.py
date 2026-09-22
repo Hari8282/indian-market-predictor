@@ -3,7 +3,7 @@ Indian Stock Market Predictor - Multi-Timeframe Backend
 Real-time data with multiple timeframe support - Patched for curl_cffi / yfinance cookie crash
 """
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import yfinance as yf
 import pandas as pd
@@ -27,12 +27,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ---------------------------------------------------------------------------
-# All market/session logic runs in Indian Standard Time (IST), regardless of
-# what timezone the server (Render, etc.) actually runs in. Every timestamp
-# the API produces — candle times, CPR dates, journal entries, market status —
-# is derived from this so the frontend can trust it's already IST.
-# ---------------------------------------------------------------------------
 IST = ZoneInfo("Asia/Kolkata")
 
 def now_ist():
@@ -41,8 +35,6 @@ def now_ist():
 def to_ist_index(index):
     """Make a DatetimeIndex tz-aware in IST, whether it arrived naive or in another tz."""
     if index.tz is None:
-        # yfinance normally returns exchange-local (already IST) naive timestamps
-        # for NSE symbols; treat naive timestamps as already being IST wall-clock.
         return index.tz_localize(IST)
     return index.tz_convert(IST)
 
@@ -58,8 +50,6 @@ CORS(
 )
 
 # Yahoo Finance configuration
-# Do not pass custom curl_cffi sessions or monkey-patched cookie jars to yfinance.
-# yfinance manages its own compatible session internally.
 CURL_CFFI_AVAILABLE = False
 _YF_SESSION = None
 
@@ -103,12 +93,6 @@ TIMEFRAMES = {
 
 # ---------------------------------------------------------------------------
 # Buy/Sell Signal Log (Trading Journal)
-#
-# Keeps an in-memory record of every BUY/SELL signal the strategy fires per
-# symbol, and tracks each one through to a close (target hit / stopped out /
-# signal reversed) using the live candle's high/low. This resets whenever the
-# server process restarts (no database), which is fine for a live dashboard
-# journal but worth knowing if you need history to survive a redeploy.
 # ---------------------------------------------------------------------------
 SIGNAL_LOG_LOCK = threading.Lock()
 SIGNAL_LOG = {'^NSEI': [], '^NSEBANK': []}
@@ -117,32 +101,11 @@ MAX_SIGNAL_LOG_PER_SYMBOL = 200
 SYMBOL_LABELS = {'^NSEI': 'NIFTY 50', '^NSEBANK': 'BANK NIFTY'}
 
 # ---------------------------------------------------------------------------
-# 5-minute history archive (GitHub-backed) + backtesting
-#
-# Render's filesystem is ephemeral (wiped on every redeploy/restart), and
-# Yahoo Finance only retains 5-minute candles for roughly the trailing 60
-# calendar days no matter how a request is chunked. So a rolling ~100-day
-# archive has to be built by ACCUMULATING data over time: each sync fetches
-# whatever 5m history Yahoo currently has, merges it into a CSV kept in a
-# GitHub repo (which survives redeploys), and trims anything older than
-# HISTORY_RETENTION_DAYS. Call /api/history/sync daily (e.g. after close) and
-# the stored file gradually grows past Yahoo's 60-day window.
-#
-# Configure via environment variables on Render:
-#   GITHUB_TOKEN     - a personal access token with 'repo' contents write scope
-#   GITHUB_REPO      - "yourusername/yourrepo"
-#   GITHUB_BRANCH    - defaults to "main"
-#   GITHUB_DATA_DIR  - folder inside the repo, defaults to "market_data"
+# GitHub-backed 5m history archive
 # ---------------------------------------------------------------------------
 GITHUB_API = "https://api.github.com"
 
 def _clean_env(name, default=""):
-    """
-    Read an env var defensively: strips whitespace and stray leading/trailing
-    slashes, and falls back to `default` if the var is unset OR set-but-blank
-    (Render/other platforms let you "add" a var with an empty value, which
-    os.environ.get(..., default) would NOT catch since the key does exist).
-    """
     val = os.environ.get(name)
     if val is None:
         return default
@@ -163,18 +126,11 @@ def _github_headers():
     return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
 
 def _history_file_path(symbol):
-    """
-    Build a well-formed repo-relative path even if GITHUB_DATA_DIR is blank,
-    or was typed with stray slashes/whitespace: join only non-empty, slash-
-    stripped segments so the result never starts with "/" or contains "//"
-    (both of which GitHub's contents API rejects as a malformed path).
-    """
     name = HISTORY_SYMBOLS.get(symbol, symbol.replace('^', '').replace('/', '_'))
     segments = [s.strip().strip('/') for s in (GITHUB_DATA_DIR, f"{name}_5m.csv")]
     return "/".join(s for s in segments if s)
 
 def github_get_file(path):
-    """Return (content_str, sha) for an existing repo file, or (None, None) if absent/unconfigured."""
     if not github_configured():
         return None, None
     url = f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{path}"
@@ -193,7 +149,6 @@ def github_get_file(path):
         return None, None
 
 def github_put_file(path, content_str, message, sha=None):
-    """Create or update a file in the configured GitHub repo. Raises on failure."""
     if not github_configured():
         raise RuntimeError("GITHUB_TOKEN and/or GITHUB_REPO are not configured on the server")
     url = f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{path}"
@@ -227,12 +182,6 @@ def _csv_to_history_df(csv_str):
     return df.dropna(subset=['Open', 'High', 'Low', 'Close']).sort_index()
 
 def fetch_5m_history_chunked(symbol, days=60, chunk_days=7):
-    """
-    Pull 5-minute candles by looping backward through `chunk_days`-sized date
-    windows rather than one big request. Yahoo caps 5m history at ~60 days
-    regardless of chunking, so `days` is clamped to that; chunking is purely
-    to make each individual request smaller/more reliable.
-    """
     days = min(days, 60)
     end = now_ist()
     start_floor = end - timedelta(days=days)
@@ -254,7 +203,7 @@ def fetch_5m_history_chunked(symbol, days=60, chunk_days=7):
         except Exception as e:
             logger.warning(f"5m history chunk failed for {symbol} [{cursor_start.date()} .. {cursor_end.date()}]: {e}")
         cursor_end = cursor_start
-        time.sleep(0.25)  # be polite between chunked requests
+        time.sleep(0.25)
 
     if not frames:
         return None
@@ -263,7 +212,6 @@ def fetch_5m_history_chunked(symbol, days=60, chunk_days=7):
     return combined
 
 def sync_5m_history_to_github(symbol):
-    """Fetch what Yahoo currently has, merge with the archive already in GitHub, trim, and store."""
     path = _history_file_path(symbol)
     existing_csv, sha = github_get_file(path)
     existing_df = _csv_to_history_df(existing_csv) if existing_csv else None
@@ -303,14 +251,12 @@ def sync_5m_history_to_github(symbol):
     }
 
 def load_5m_history(symbol):
-    """Load the archived 5m history for a symbol from GitHub. Returns None if unavailable."""
     csv_str, _ = github_get_file(_history_file_path(symbol))
     if not csv_str:
         return None
     return _csv_to_history_df(csv_str)
 
 def fetch_global_daily_history(period='400d'):
-    """Daily OHLC history (no 60-day limit) for every configured global index."""
     out = {}
     for region, indices in GLOBAL_INDICES.items():
         for sym in indices:
@@ -323,12 +269,6 @@ def fetch_global_daily_history(period='400d'):
     return out
 
 def historical_global_status(global_daily, target_date):
-    """
-    Replicate fetch_global_markets()'s bullish/bearish classification, but as
-    it would have read using each index's last close on/before `target_date`
-    versus the close before that — i.e. a point-in-time version of the same
-    >60%/<40% positive-index-ratio rule used live.
-    """
     positive, total = 0, 0
     for sym, df in global_daily.items():
         try:
@@ -352,7 +292,6 @@ def historical_global_status(global_daily, target_date):
     return 'neutral'
 
 def _close_trade(trade, exit_price, status, exit_time):
-    """Mark a journal entry closed and compute its P&L."""
     trade['status'] = status
     trade['exitPrice'] = round(float(exit_price), 2)
     try:
@@ -369,12 +308,6 @@ def _close_trade(trade, exit_price, status, exit_time):
     trade['pnlPercent'] = round((pnl / trade['entry']) * 100, 2) if trade.get('entry') else 0.0
 
 def record_signal_for_journal(symbol, timeframe, trade_signal, data):
-    """
-    Log a fresh BUY/SELL signal as a new journal entry, and settle any
-    currently open entry for this symbol first — either because price hit
-    its stop/target on the latest candle, or because the strategy's signal
-    has changed direction (or gone back to HOLD).
-    """
     global _SIGNAL_LOG_COUNTER
     if data is None or len(data) == 0 or not isinstance(trade_signal, dict):
         return
@@ -393,7 +326,6 @@ def record_signal_for_journal(symbol, timeframe, trade_signal, data):
         entries = SIGNAL_LOG.setdefault(symbol, [])
         open_trade = next((t for t in reversed(entries) if t['status'] == 'OPEN'), None)
 
-        # 1) Settle an open trade if the latest candle touched its stop/target.
         if open_trade:
             if open_trade['signal'] == 'BUY':
                 if open_trade['stopLoss'] is not None and last_low <= open_trade['stopLoss']:
@@ -410,14 +342,10 @@ def record_signal_for_journal(symbol, timeframe, trade_signal, data):
                     _close_trade(open_trade, open_trade['target'], 'TARGET_HIT', last_time)
                     open_trade = None
 
-        # 2) If still open but the strategy's signal has moved away from it
-        #    (reversed direction or dropped to HOLD), close it at the current price.
         if open_trade and new_signal != open_trade['signal']:
             _close_trade(open_trade, last_close, 'CLOSED_SIGNAL_CHANGE', last_time)
             open_trade = None
 
-        # 3) Only open a fresh entry when there's no open trade already and the
-        #    strategy has actually produced a BUY/SELL (not just a repeat poll).
         if not open_trade and new_signal in ('BUY', 'SELL'):
             _SIGNAL_LOG_COUNTER += 1
             entries.append({
@@ -444,32 +372,27 @@ def record_signal_for_journal(symbol, timeframe, trade_signal, data):
             SIGNAL_LOG[symbol] = entries[-MAX_SIGNAL_LOG_PER_SYMBOL:]
 
 def _daily_ohlc_from_5m(intraday_df):
-    """Resample 5m candles into one Open/High/Low/Close row per IST calendar day."""
     daily = intraday_df.groupby(intraday_df.index.date).agg(
         Open=('Open', 'first'), High=('High', 'max'), Low=('Low', 'min'), Close=('Close', 'last')
     )
     return daily
 
-ENTRY_RANGE_MIN = 0.40  # lower bound of the entry candle close zone within the 1st candle's range
-ENTRY_RANGE_MAX = 0.60  # upper bound of the entry candle close zone within the 1st candle's range
-STOP_LOSS_BUFFER_POINTS = 20  # fixed-point buffer added to the entry candle's low/high for stop candidate #1
-TRAIL_TRIGGER_R = 1.5    # once open profit reaches this many R, the trailing adjustment activates
-TRAIL_LOCK_R = 1.0       # stop is moved to lock in this many R of profit once triggered
-EXTENDED_TARGET_R = 10.0  # target is extended to this many R (from the original 2R) once the trail activates
+ENTRY_RANGE_MIN = 0.40
+ENTRY_RANGE_MAX = 0.60
+STOP_LOSS_BUFFER_POINTS = 20
+
+# ---------------------------------------------------------------------------
+# UPDATED: Multi-Tier Trailing Stop Definitions
+# ---------------------------------------------------------------------------
+TRAIL_TIERS = [
+    {"trigger": 1.5, "lock": 0.0},  # > 1.5R profit -> Stop = Entry (0R)
+    {"trigger": 2.0, "lock": 0.5},  # > 2.0R profit -> Stop = +0.5R
+    {"trigger": 3.0, "lock": 1.5},  # > 3.0R profit -> Stop = +1.5R
+    {"trigger": 4.0, "lock": 3.0},  # > 4.0R profit -> Stop = +3.0R
+]
+EXTENDED_TARGET_R = 10.0
 
 def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_points=STOP_LOSS_BUFFER_POINTS):
-    """
-    Two stop-loss candidates are computed, and whichever gives the SMALLER
-    risk (i.e. sits closer to entry) is used:
-      1. the entry candle's own low, minus a fixed point buffer (BUY) /
-         its high, plus a fixed point buffer (SELL)
-      2. the day's CPR BC (BUY) / TC (SELL) -- a close back through this
-         level would invalidate the setup, so it doubles as a structural stop
-
-    A candidate only counts if it's actually on the correct side of entry
-    (i.e. it would produce positive risk); if neither candidate is valid,
-    returns None and the trade is skipped.
-    """
     if signal == 'BUY':
         candidates = [float(entry_row['Low']) - buffer_points, bc]
         valid = [c for c in candidates if c < entry]
@@ -480,30 +403,10 @@ def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_points=STOP_LOSS_
         return min(valid) if valid else None
 
 def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=STOP_LOSS_BUFFER_POINTS,
-                  trail_trigger_r=TRAIL_TRIGGER_R, trail_lock_r=TRAIL_LOCK_R, extended_target_r=EXTENDED_TARGET_R):
-    """
-    Backtest the opening-range breakout strategy over the archived 5m history:
+                 trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
+    if trail_tiers is None:
+        trail_tiers = TRAIL_TIERS
 
-      BUY  -> global market status bullish AND the day's 1st 5m candle is green
-              AND its close is above the day's CPR TC. Then the first later
-              candle whose CLOSE falls between 40% and 60% of the 1st candle's range triggers entry.
-
-              Stop loss is the TIGHTER (minimum-risk) of two candidates (see
-              _choose_stop_loss): the entry candle's low minus `stop_buffer`
-              points, or the day's CPR BC -- whichever is closer to entry.
-              Target = entry + risk * min_rr (the same minimum 1:2
-              reward:risk the live strategy enforces).
-
-      SELL -> the mirror image: bearish global status, red 1st candle below
-              CPR BC. Then the first later candle whose CLOSE falls between
-              40% and 60% of the 1st candle's range measured down from the
-              high triggers entry.
-              Stop is the tighter of (entry candle's high + stop_buffer) or CPR TC.
-
-    Only one trade is taken per day (the first qualifying breakout); if
-    neither target nor stop is hit by the day's last candle, the trade is
-    closed at that last candle's close (EOD_CLOSE), matching intraday practice.
-    """
     intraday = load_5m_history(symbol)
     data_source = 'github_archive'
     if intraday is None or len(intraday) == 0:
@@ -534,7 +437,7 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
 
     for i, d in enumerate(trading_dates):
         if i == 0:
-            continue  # no prior day available for CPR yet
+            continue
         prev_date = trading_dates[i - 1]
         if prev_date not in daily_ohlc.index:
             continue
@@ -577,7 +480,7 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
                     if risk > 0:
                         target = round(entry + risk * min_rr, 2)
                         trade = _simulate_trade(day_candles, entry_time, 'BUY', entry, stop, target, risk, d, global_status, first_candle_label,
-                                                 trail_trigger_r, trail_lock_r, extended_target_r)
+                                                 trail_tiers, extended_target_r)
 
         elif global_status == 'bearish' and first_red and below_bc:
             setups_identified += 1
@@ -594,7 +497,7 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
                     if risk > 0:
                         target = round(entry - risk * min_rr, 2)
                         trade = _simulate_trade(day_candles, entry_time, 'SELL', entry, stop, target, risk, d, global_status, first_candle_label,
-                                                 trail_trigger_r, trail_lock_r, extended_target_r)
+                                                 trail_tiers, extended_target_r)
 
         if trade:
             trades.append(trade)
@@ -609,32 +512,31 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         "dataSource": data_source,
         "entryRangeZone": {"min": ENTRY_RANGE_MIN, "max": ENTRY_RANGE_MAX},
         "stopLossBufferPoints": stop_buffer,
-        "trailing": {"triggerR": trail_trigger_r, "lockR": trail_lock_r, "extendedTargetR": extended_target_r},
+        "trailing": {"tiers": trail_tiers, "extendedTargetR": extended_target_r},
         "historyRange": {
             "from": intraday.index[0].strftime('%Y-%m-%d'),
             "to": intraday.index[-1].strftime('%Y-%m-%d')
         }
     }
 
+# ---------------------------------------------------------------------------
+# UPDATED: Multi-Tier Trailing Simulation Logic
+# ---------------------------------------------------------------------------
 def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, trade_date,
                      global_status, first_candle_label,
-                     trail_trigger_r=TRAIL_TRIGGER_R, trail_lock_r=TRAIL_LOCK_R, extended_target_r=EXTENDED_TARGET_R):
+                     trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
     """
     Walk forward through the rest of the day's candles to find the exit.
 
-    Trailing stop/target: once the trade's open profit reaches `trail_trigger_r`
-    R (checked off each candle's favorable extreme -- High for BUY, Low for
-    SELL), the stop is moved to lock in `trail_lock_r` R of profit and the
-    target is extended out to `extended_target_r` R, both measured off the
-    original entry risk. This is a single step adjustment (not a continuous
-    ratchet) and only ever moves the stop in the trade's favor.
-
-    Within any one candle, the CURRENT stop is always checked before the
-    trail-trigger condition -- OHLC data can't tell us the exact intra-candle
-    order price touched levels in, so a candle can't both stop the trade out
-    and trail it; the conservative (stop-first) reading wins, same as the
-    non-trailing exit checks below.
+    Multi-tier trailing stop loss:
+      - > 1.5R -> Stop moved to Entry (0R)
+      - > 2.0R -> Stop moved to +0.5R
+      - > 3.0R -> Stop moved to +1.5R
+      - > 4.0R -> Stop moved to +3.0R
     """
+    if trail_tiers is None:
+        trail_tiers = TRAIL_TIERS
+
     after_entry = day_candles[day_candles.index > entry_time]
     exit_price, exit_reason, exit_time = None, 'EOD_CLOSE', None
     current_stop, current_target = stop, target
@@ -650,21 +552,36 @@ def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, 
             if high >= current_target:
                 exit_price, exit_reason, exit_time = current_target, 'TARGET_HIT', t
                 break
-            if not trailed and risk > 0 and (high - entry) / risk >= trail_trigger_r:
-                current_stop = entry + trail_lock_r * risk
-                current_target = entry + extended_target_r * risk
-                trailed = True
-        else:
+
+            if risk > 0:
+                current_r = (high - entry) / risk
+                for tier in sorted(trail_tiers, key=lambda x: x["trigger"], reverse=True):
+                    if current_r > tier["trigger"]:
+                        new_stop = entry + tier["lock"] * risk
+                        if new_stop > current_stop:
+                            current_stop = new_stop
+                            current_target = entry + extended_target_r * risk
+                            trailed = True
+                        break
+
+        else:  # SELL
             if high >= current_stop:
                 exit_price, exit_reason, exit_time = current_stop, ('TRAILED_STOP' if trailed else 'STOPPED_OUT'), t
                 break
             if low <= current_target:
                 exit_price, exit_reason, exit_time = current_target, 'TARGET_HIT', t
                 break
-            if not trailed and risk > 0 and (entry - low) / risk >= trail_trigger_r:
-                current_stop = entry - trail_lock_r * risk
-                current_target = entry - extended_target_r * risk
-                trailed = True
+
+            if risk > 0:
+                current_r = (entry - low) / risk
+                for tier in sorted(trail_tiers, key=lambda x: x["trigger"], reverse=True):
+                    if current_r > tier["trigger"]:
+                        new_stop = entry - tier["lock"] * risk
+                        if new_stop < current_stop:
+                            current_stop = new_stop
+                            current_target = entry - extended_target_r * risk
+                            trailed = True
+                        break
 
     if exit_price is None:
         exit_price = float(day_candles.iloc[-1]['Close'])
@@ -716,7 +633,6 @@ def _backtest_stats(trades):
     }
 
 def _compute_journal_stats(trades):
-    """Win rate / totals for a list of journal entries (already filtered/sorted by caller)."""
     closed_statuses = ('TARGET_HIT', 'STOPPED_OUT', 'CLOSED_SIGNAL_CHANGE')
     closed = [t for t in trades if t['status'] in closed_statuses and t.get('pnlPoints') is not None]
     wins = [t for t in closed if t['pnlPoints'] > 0]
@@ -863,7 +779,6 @@ def calculate_support_resistance_with_period(symbol, timeframe, current_data):
     return support, resistance, {'basis': str(basis), 'period_label': str(period_label)}
 
 def _normalize_yf_data(data):
-    """Normalize Yahoo/yfinance data to a simple OHLCV DataFrame, timestamped in IST."""
     if data is None or data.empty:
         return None
     if isinstance(data.columns, pd.MultiIndex):
@@ -878,9 +793,7 @@ def _normalize_yf_data(data):
         logger.warning(f"Could not normalize index to IST: {e}")
     return data
 
-
 def _fetch_yahoo_chart_direct(symbol, period, interval):
-    """Fallback that calls Yahoo's chart API directly when yfinance fails."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = {"range": period, "interval": interval, "includePrePost": "false"}
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -908,9 +821,7 @@ def _fetch_yahoo_chart_direct(symbol, period, interval):
         logger.warning(f"Direct Yahoo chart fallback failed for {symbol}: {e}")
         return None
 
-
 def fetch_market_data(symbol, timeframe='15m'):
-    """Fetch market data with retries, direct Yahoo fallback, and short cache."""
     if timeframe not in TIMEFRAMES:
         timeframe = '15m'
 
@@ -970,20 +881,9 @@ def fetch_market_data(symbol, timeframe='15m'):
     logger.error(f"All market-data providers failed for {symbol}")
     return None
 
-
-MIN_STRUCTURE_CANDLES = 21  # 10 left + pivot + 10 right = smallest window that can confirm one swing
+MIN_STRUCTURE_CANDLES = 21
 
 def detect_market_structure(data, lookback=None, left_bars=10, right_bars=10, min_candles=MIN_STRUCTURE_CANDLES):
-    """
-    Confirm HH/HL/LH/LL swing points using a fractal window: a candle is only
-    accepted as a swing high/low if it is the highest/lowest point across
-    `left_bars` candles before it AND `right_bars` candles after it.
-    A pivot is confirmed only once `right_bars` candles have completed to its right.
-
-    `lookback=None` (the default) analyzes the ENTIRE fetched dataset rather than
-    an arbitrary recent window, so swing markers cover the whole chart instead of
-    just its most recent candles.
-    """
     min_required = max(min_candles, left_bars + right_bars + 1)
     empty = {
         "valid": False, "minimumCandles": min_required, "candlesAnalyzed": 0,
@@ -1011,10 +911,7 @@ def detect_market_structure(data, lookback=None, left_bars=10, right_bars=10, mi
 
     swing_highs, swing_lows = [], []
     for n, (i, price) in enumerate(highs):
-        if n == 0:
-            typ = "SH"
-        else:
-            typ = "HH" if price > highs[n-1][1] else "LH"
+        typ = "SH" if n == 0 else ("HH" if price > highs[n-1][1] else "LH")
         swing_highs.append({
             "index": int(i),
             "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
@@ -1024,10 +921,7 @@ def detect_market_structure(data, lookback=None, left_bars=10, right_bars=10, mi
         })
 
     for n, (i, price) in enumerate(lows):
-        if n == 0:
-            typ = "SL"
-        else:
-            typ = "HL" if price > lows[n-1][1] else "LL"
+        typ = "SL" if n == 0 else ("HL" if price > lows[n-1][1] else "LL")
         swing_lows.append({
             "index": int(i),
             "timestamp": d.index[i].strftime("%Y-%m-%d %H:%M"),
@@ -1046,9 +940,6 @@ def detect_market_structure(data, lookback=None, left_bars=10, right_bars=10, mi
     else:
         trend, score = "neutral", 0
 
-    # No slicing here: every confirmed HH/HL/LH/LL across the full analyzed
-    # window is returned so the chart can mark the entire visible history,
-    # not just the most recent handful of swings.
     structure = sorted(
         [x for x in swing_highs + swing_lows if x["type"] in ("HH", "HL", "LH", "LL")],
         key=lambda x: x["index"]
@@ -1067,7 +958,6 @@ def detect_market_structure(data, lookback=None, left_bars=10, right_bars=10, mi
         "score": score
     }
 
-
 def _unique_zone_levels(points, current_price, side, tolerance):
     values = sorted([float(x["price"]) for x in points])
     if side == "support":
@@ -1082,7 +972,6 @@ def _unique_zone_levels(points, current_price, side, tolerance):
             merged.append(value)
     return merged[:4]
 
-
 def calculate_structure_sr(data, structure):
     if data is None or len(data) == 0 or not structure.get("valid"):
         return [], []
@@ -1091,33 +980,15 @@ def calculate_structure_sr(data, structure):
     recent_range = float((data["High"].tail(20) - data["Low"].tail(20)).mean())
     tolerance = max(recent_range * 0.35, price * 0.001)
 
-    supports = _unique_zone_levels(
-        structure.get("swingLows", []), price, "support", tolerance
-    )
-    resistances = _unique_zone_levels(
-        structure.get("swingHighs", []), price, "resistance", tolerance
-    )
+    supports = _unique_zone_levels(structure.get("swingLows", []), price, "support", tolerance)
+    resistances = _unique_zone_levels(structure.get("swingHighs", []), price, "resistance", tolerance)
 
     return (
-        [{"level": f"MS-S{i+1}", "value": round(v, 2), "type": "Market Structure",
-          "source": "HL/LL confirmed swing low"} for i, v in enumerate(supports)],
-        [{"level": f"MS-R{i+1}", "value": round(v, 2), "type": "Market Structure",
-          "source": "HH/LH confirmed swing high"} for i, v in enumerate(resistances)]
+        [{"level": f"MS-S{i+1}", "value": round(v, 2), "type": "Market Structure", "source": "HL/LL confirmed swing low"} for i, v in enumerate(supports)],
+        [{"level": f"MS-R{i+1}", "value": round(v, 2), "type": "Market Structure", "source": "HH/LH confirmed swing high"} for i, v in enumerate(resistances)]
     )
 
-
 def generate_trade_signal(data, prediction, cpr, support, resistance, market_structure):
-    """
-    Select higher-quality entry areas and only return BUY/SELL when the setup
-    has a realistic minimum reward:risk of 1:2.
-
-    Priority:
-      BUY  -> bullish prediction + HH/HL + entry near TC/support or HL breakout.
-      SELL -> bearish prediction + LH/LL + entry near BC/resistance or LH breakdown.
-
-    Target selection prefers real market levels beyond 2R. If no valid level
-    exists, the signal is HOLD rather than publishing a misleading target.
-    """
     hold = {
         "signal": "HOLD", "entry": None, "stopLoss": None, "target": None,
         "riskReward": 0, "confidence": 0,
@@ -1145,7 +1016,6 @@ def generate_trade_signal(data, prediction, cpr, support, resistance, market_str
     last_hl = structure.get("lastHL")
     last_lh = structure.get("lastLH")
 
-    # ATR-like volatility buffer used only to place stops beyond structure.
     ranges = (df["High"] - df["Low"]).tail(min(14, len(df)))
     atr = float(ranges.mean()) if len(ranges) else 0.0
     atr = max(atr, entry * 0.0008, 1.0)
@@ -1175,7 +1045,6 @@ def generate_trade_signal(data, prediction, cpr, support, resistance, market_str
     tc, pivot, bc = cpr_num("tc"), cpr_num("pivot"), cpr_num("bc")
     proximity = max(atr * 0.40, entry * 0.0010)
 
-    # Confirm structure breakouts against the actual pivot candle.
     hl_breakout = False
     lh_breakdown = False
     hl_price = lh_price = None
@@ -1208,12 +1077,8 @@ def generate_trade_signal(data, prediction, cpr, support, resistance, market_str
     bullish = direction in ("bullish", "buy", "up") and trend == "bullish"
     bearish = direction in ("bearish", "sell", "down") and trend == "bearish"
 
-    # Choose an entry area, then derive stop first. Target is always derived
-    # from the final stop distance and then upgraded to the next real level.
     if bullish and (near_tc or bullish_cpr or hl_breakout):
         entry_reason = "HL breakout" if hl_breakout else "near/above CPR TC"
-
-        # Stop below HL first; otherwise below nearest valid support.
         stop_candidates = [v for v in support_levels if v < entry]
         if hl_price is not None and hl_price < entry:
             stop_candidates.append(hl_price)
@@ -1226,7 +1091,6 @@ def generate_trade_signal(data, prediction, cpr, support, resistance, market_str
 
         min_target = entry + risk * 2.0
         higher_resistance = [v for v in resistance_levels if v >= min_target]
-        # Prefer the nearest genuine resistance that still gives >=2R.
         target = higher_resistance[0] if higher_resistance else entry + risk * 2.0
         rr = (target - entry) / risk
 
@@ -1253,8 +1117,6 @@ def generate_trade_signal(data, prediction, cpr, support, resistance, market_str
 
     if bearish and (near_bc or bearish_cpr or lh_breakdown):
         entry_reason = "LH breakdown" if lh_breakdown else "near/below CPR BC"
-
-        # Stop above LH first; otherwise above nearest valid resistance.
         stop_candidates = [v for v in resistance_levels if v > entry]
         if lh_price is not None and lh_price > entry:
             stop_candidates.append(lh_price)
@@ -1267,7 +1129,6 @@ def generate_trade_signal(data, prediction, cpr, support, resistance, market_str
 
         min_target = entry - risk * 2.0
         lower_support = sorted([v for v in support_levels if v <= min_target], reverse=True)
-        # Prefer nearest genuine support that still gives >=2R.
         target = lower_support[0] if lower_support else entry - risk * 2.0
         rr = (entry - target) / risk
 
@@ -1297,11 +1158,6 @@ def generate_trade_signal(data, prediction, cpr, support, resistance, market_str
     return hold
 
 def generate_candlestick_data(data, max_candles=None):
-    """
-    Chart-ready OHLCV data, timestamped in IST. By default charts the ENTIRE
-    fetched dataset (max_candles=None) so it lines up 1:1 with the swing
-    structure markers, which are also computed over the full dataset.
-    """
     if data is None or len(data) == 0:
         return []
     d = data.tail(max_candles) if max_candles else data
@@ -1319,7 +1175,6 @@ def generate_candlestick_data(data, max_candles=None):
     return candles
 
 def calculate_volume_analysis(data):
-    """Compare the latest volume bar against its recent average to gauge participation."""
     try:
         if data is None or len(data) == 0 or 'Volume' not in data.columns:
             return {'current_volume': 0, 'avg_volume': 0, 'volume_ratio': 0.0, 'volume_trend': 'unknown'}
@@ -1415,7 +1270,6 @@ def calculate_technical_indicators(data):
         return {}
 
 def predict_market_direction(nifty_data, global_markets, indicators):
-    """Enhanced prediction with multiple factors"""
     if nifty_data is None or len(nifty_data) < 20:
         return {'direction': 'neutral', 'confidence': 50.0, 'sentiment': 'neutral', 'signals': {}, 'global_positive_ratio': 50.0}
     
@@ -1584,10 +1438,7 @@ def get_market_data():
         if timeframe not in TIMEFRAMES:
             return jsonify({'error': 'Invalid timeframe'}), 400
 
-        # Fetch Nifty once and reuse the same dataframe throughout this request.
         nifty_data_raw = fetch_market_data('^NSEI', timeframe)
-
-        # Global markets are used to calculate the market prediction.
         global_markets = fetch_global_markets()
 
         nifty_indicators = (
@@ -1689,7 +1540,6 @@ def get_market_status():
 
 @app.route('/api/signal-log', methods=['GET'])
 def get_signal_log():
-    """Trading journal: every BUY/SELL signal fired, with outcome and stats."""
     try:
         symbol_param = str(request.args.get('symbol', 'all')).strip().lower()
         if symbol_param in ('nifty', 'nifty50', 'nifty 50', '^nsei'):
@@ -1734,11 +1584,6 @@ def _resolve_symbols_param(raw):
 
 @app.route('/api/history/sync', methods=['GET', 'POST'])
 def sync_history():
-    """
-    Fetch the 5m history Yahoo currently has and merge it into the GitHub-backed
-    archive for the requested symbol(s). Call this periodically (e.g. once after
-    market close) so the archive accumulates past Yahoo's ~60-day retention.
-    """
     if not github_configured():
         return jsonify({
             'error': 'GitHub storage is not configured on the server',
@@ -1751,7 +1596,6 @@ def sync_history():
 
 @app.route('/api/history/status', methods=['GET'])
 def history_status():
-    """Read-only view of what's currently archived in GitHub, without fetching anything new."""
     symbols = _resolve_symbols_param(request.args.get('symbol', 'all'))
     results = []
     for sym in symbols:
@@ -1772,49 +1616,36 @@ def history_status():
 
 @app.route('/api/backtest', methods=['GET'])
 def get_backtest():
-    """
-    Run the opening-range breakout backtest (see run_backtest docstring) over
-    the archived (or, if unavailable, live max-60-day) 5m history.
-    """
     try:
         symbol = _resolve_symbols_param(request.args.get('symbol', 'nifty'))[0]
         try:
             days = max(1, min(HISTORY_RETENTION_DAYS, int(request.args.get('days', HISTORY_RETENTION_DAYS))))
         except (TypeError, ValueError):
             days = HISTORY_RETENTION_DAYS
-        try:
-            entry_fraction = request.args.get('entryFraction')
-            entry_fraction = max(0.0, min(1.0, float(entry_fraction))) if entry_fraction is not None else None
-        except (TypeError, ValueError):
-            entry_fraction = None
-        try:
-            stop_buffer = request.args.get('stopBuffer')
-            stop_buffer = max(0.0, float(stop_buffer)) if stop_buffer is not None else STOP_LOSS_BUFFER_POINTS
-        except (TypeError, ValueError):
-            stop_buffer = STOP_LOSS_BUFFER_POINTS
-        try:
-            trail_trigger_r = float(request.args.get('trailTriggerR', TRAIL_TRIGGER_R))
-        except (TypeError, ValueError):
-            trail_trigger_r = TRAIL_TRIGGER_R
-        try:
-            trail_lock_r = float(request.args.get('trailLockR', TRAIL_LOCK_R))
-        except (TypeError, ValueError):
-            trail_lock_r = TRAIL_LOCK_R
-        try:
-            extended_target_r = float(request.args.get('extendedTargetR', EXTENDED_TARGET_R))
-        except (TypeError, ValueError):
-            extended_target_r = EXTENDED_TARGET_R
-        result = run_backtest(symbol, days=days, entry_fraction=entry_fraction, stop_buffer=stop_buffer,
-                               trail_trigger_r=trail_trigger_r, trail_lock_r=trail_lock_r, extended_target_r=extended_target_r)
+
+        result = run_backtest(symbol, days=days, stop_buffer=STOP_LOSS_BUFFER_POINTS,
+                              trail_tiers=TRAIL_TIERS, extended_target_r=EXTENDED_TARGET_R)
         result['timestamp'] = now_ist().isoformat()
         return jsonify(result)
     except Exception as e:
         logger.exception("Backtest handler exception")
         return jsonify({'error': 'Backtest failed', 'details': str(e)}), 500
 
+# ---------------------------------------------------------------------------
+# NEW: File Download Endpoint
+# ---------------------------------------------------------------------------
+@app.route('/api/download-app', methods=['GET'])
+def download_app():
+    """Allows downloading the current source code file."""
+    try:
+        return send_file(__file__, as_attachment=True, download_name="app.py")
+    except Exception as e:
+        logger.exception("Download application exception")
+        return jsonify({'error': 'Failed to download file', 'details': str(e)}), 500
+
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'service': 'Indian Stock Market Predictor', 'version': '2.0.0-patched'})
+    return jsonify({'service': 'Indian Stock Market Predictor', 'version': '2.1.0-updated'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
