@@ -98,7 +98,7 @@ SIGNAL_LOG_LOCK = threading.Lock()
 SIGNAL_LOG = {'^NSEI': [], '^NSEBANK': []}
 _SIGNAL_LOG_COUNTER = 0
 MAX_SIGNAL_LOG_PER_SYMBOL = 200
-SYMBOL_LABELS = {'^NSEI': 'NIFTY 50', '^NSEBANK': 'BANK NIFTY'}
+SYMBOL_LABELS = {'^NSEI': 'NIFTY 50', '^NSEBANK': 'BANK NIFTY', '^BSESN': 'SENSEX'}
 
 # ---------------------------------------------------------------------------
 # GitHub-backed 5m history archive
@@ -117,7 +117,7 @@ GITHUB_REPO = _clean_env("GITHUB_REPO", default=None) or None
 GITHUB_BRANCH = _clean_env("GITHUB_BRANCH", default="main")
 GITHUB_DATA_DIR = _clean_env("GITHUB_DATA_DIR", default="market_data")
 HISTORY_RETENTION_DAYS = 100
-HISTORY_SYMBOLS = {'^NSEI': 'NIFTY', '^NSEBANK': 'BANKNIFTY'}
+HISTORY_SYMBOLS = {'^NSEI': 'NIFTY', '^NSEBANK': 'BANKNIFTY', '^BSESN': 'SENSEX'}
 
 def github_configured():
     return bool(GITHUB_TOKEN and GITHUB_REPO)
@@ -1580,7 +1580,9 @@ def _resolve_symbols_param(raw):
         return ['^NSEI']
     if v in ('banknifty', 'bank_nifty', 'bank nifty', '^nsebank'):
         return ['^NSEBANK']
-    return ['^NSEI', '^NSEBANK']
+    if v in ('sensex', 'bsesn', '^bsesn', 'bse', 'bse sensex'):
+        return ['^BSESN']
+    return ['^NSEI', '^NSEBANK', '^BSESN']
 
 @app.route('/api/history/sync', methods=['GET', 'POST'])
 def sync_history():
