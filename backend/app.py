@@ -379,7 +379,7 @@ def _daily_ohlc_from_5m(intraday_df):
 
 ENTRY_RANGE_MIN = 0.40
 ENTRY_RANGE_MAX = 0.60
-STOP_LOSS_BUFFER_POINTS = 20
+STOP_LOSS_BUFFER_PCT = 0.1  # percent; buffer = 0.1% of the entry candle's High/Low (per signal direction)
 
 # ---------------------------------------------------------------------------
 # UPDATED: Multi-Tier Trailing Stop Definitions
@@ -392,17 +392,27 @@ TRAIL_TIERS = [
 ]
 EXTENDED_TARGET_R = 10.0
 
-def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_points=STOP_LOSS_BUFFER_POINTS):
+def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_pct=STOP_LOSS_BUFFER_PCT):
+    """
+    Stop loss buffer is 0.1% (configurable) of the entry candle's High/Low,
+    applied on the side of the candle that matches the signal direction:
+    - BUY: buffer below the entry candle's Low
+    - SELL: buffer above the entry candle's High
+    """
     if signal == 'BUY':
-        candidates = [float(entry_row['Low']) - buffer_points, bc]
+        low = float(entry_row['Low'])
+        buffer_points = low * (buffer_pct / 100.0)
+        candidates = [low - buffer_points, bc]
         valid = [c for c in candidates if c < entry]
         return max(valid) if valid else None
     else:
-        candidates = [float(entry_row['High']) + buffer_points, tc]
+        high = float(entry_row['High'])
+        buffer_points = high * (buffer_pct / 100.0)
+        candidates = [high + buffer_points, tc]
         valid = [c for c in candidates if c > entry]
         return min(valid) if valid else None
 
-def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=STOP_LOSS_BUFFER_POINTS,
+def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=STOP_LOSS_BUFFER_PCT,
                  trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
     if trail_tiers is None:
         trail_tiers = TRAIL_TIERS
@@ -511,7 +521,7 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         "setupsIdentified": setups_identified,
         "dataSource": data_source,
         "entryRangeZone": {"min": ENTRY_RANGE_MIN, "max": ENTRY_RANGE_MAX},
-        "stopLossBufferPoints": stop_buffer,
+        "stopLossBufferPct": stop_buffer,
         "trailing": {"tiers": trail_tiers, "extendedTargetR": extended_target_r},
         "historyRange": {
             "from": intraday.index[0].strftime('%Y-%m-%d'),
@@ -1625,7 +1635,7 @@ def get_backtest():
         except (TypeError, ValueError):
             days = HISTORY_RETENTION_DAYS
 
-        result = run_backtest(symbol, days=days, stop_buffer=STOP_LOSS_BUFFER_POINTS,
+        result = run_backtest(symbol, days=days, stop_buffer=STOP_LOSS_BUFFER_PCT,
                               trail_tiers=TRAIL_TIERS, extended_target_r=EXTENDED_TARGET_R)
         result['timestamp'] = now_ist().isoformat()
         return jsonify(result)
