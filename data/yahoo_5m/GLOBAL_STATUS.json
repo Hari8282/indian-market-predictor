@@ -1,0 +1,93 @@
+{
+  "2026-10-01": {
+    "capturedAt": "2026-10-01T11:25:19.690787+05:30",
+    "indices": [
+      {
+        "barDate": "2026-09-30",
+        "changePct": 3.23,
+        "close": 68912.08,
+        "name": "Nikkei 225",
+        "prevClose": 66753.72,
+        "symbol": "^N225"
+      },
+      {
+        "barDate": "2026-09-29",
+        "changePct": 0.37,
+        "close": 24613.27,
+        "name": "Hang Seng",
+        "prevClose": 24523.57,
+        "symbol": "^HSI"
+      },
+      {
+        "barDate": "2026-09-29",
+        "changePct": 0.31,
+        "close": 3842.2,
+        "name": "Shanghai Composite",
+        "prevClose": 3830.45,
+        "symbol": "000001.SS"
+      },
+      {
+        "barDate": "2026-09-30",
+        "changePct": 1.74,
+        "close": 6956.91,
+        "name": "KOSPI",
+        "prevClose": 6838.04,
+        "symbol": "^KS11"
+      },
+      {
+        "barDate": "2026-09-30",
+        "changePct": -0.29,
+        "close": 10606.0,
+        "name": "FTSE 100",
+        "prevClose": 10636.7,
+        "symbol": "^FTSE"
+      },
+      {
+        "barDate": "2026-09-30",
+        "changePct": -0.79,
+        "close": 25199.19,
+        "name": "DAX",
+        "prevClose": 25399.21,
+        "symbol": "^GDAXI"
+      },
+      {
+        "barDate": "2026-09-30",
+        "changePct": -0.89,
+        "close": 7964.51,
+        "name": "CAC 40",
+        "prevClose": 8035.87,
+        "symbol": "^FCHI"
+      },
+      {
+        "barDate": "2026-09-30",
+        "changePct": -0.25,
+        "close": 7651.54,
+        "name": "S&P 500",
+        "prevClose": 7670.84,
+        "symbol": "^GSPC"
+      },
+      {
+        "barDate": "2026-09-30",
+        "changePct": 0.24,
+        "close": 26861.06,
+        "name": "NASDAQ",
+        "prevClose": 26797.54,
+        "symbol": "^IXIC"
+      },
+      {
+        "barDate": "2026-09-30",
+        "changePct": -0.86,
+        "close": 50906.05,
+        "name": "Dow Jones",
+        "prevClose": 51349.92,
+        "symbol": "^DJI"
+      }
+    ],
+    "indicesFailed": [],
+    "late": true,
+    "positive": 5,
+    "source": "morning_snapshot",
+    "status": "neutral",
+    "total": 10
+  }
+}
