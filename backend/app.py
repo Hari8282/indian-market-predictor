@@ -256,19 +256,55 @@ def load_5m_history(symbol):
         return None
     return _csv_to_history_df(csv_str)
 
-def fetch_global_daily_history(period='400d'):
-    out = {}
+# ---------------------------------------------------------------------------
+# Global-market status: retry-safe fetch + frozen per-date store
+#   * Every download is retried and failures are reported (never silently skipped)
+#   * If too few indices load, new statuses are NOT computed ('unknown' -> no trade)
+#   * A past day's status is computed once, frozen, and never recalculated, so
+#     a backtest of an old date gives the same answer on every run.
+# ---------------------------------------------------------------------------
+GLOBAL_STATUS_FILE = "GLOBAL_STATUS.json"
+GLOBAL_FETCH_RETRIES = 3
+try:
+    MIN_GLOBAL_SYMBOLS = int(_clean_env("MIN_GLOBAL_SYMBOLS", default="8"))
+except ValueError:
+    MIN_GLOBAL_SYMBOLS = 8
+GLOBAL_FREEZE_HOUR_IST = 4          # freeze a day only after 04:00 IST next morning (US close is final)
+GLOBAL_ADMIN_KEY = _clean_env("ADMIN_KEY", default=None) or None
+_VALID_GLOBAL_STATUS = ('bullish', 'bearish', 'neutral')
+_GLOBAL_STORE_LOCK = threading.Lock()
+_GLOBAL_STORE_LOCAL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), GLOBAL_STATUS_FILE)
+
+def fetch_global_daily_history_checked(period='400d'):
+    """Returns (data_by_symbol, expected_count, failed_symbols). Each symbol is retried."""
+    out, failed, expected = {}, [], 0
     for region, indices in GLOBAL_INDICES.items():
         for sym in indices:
-            try:
-                df = _normalize_yf_data(get_ticker(sym).history(period=period, interval='1d', timeout=15))
-                if df is not None and len(df):
-                    out[sym] = df
-            except Exception as e:
-                logger.warning(f"Global daily history failed for {sym}: {e}")
-    return out
+            expected += 1
+            df, last_err = None, None
+            for attempt in range(1, GLOBAL_FETCH_RETRIES + 1):
+                try:
+                    df = _normalize_yf_data(get_ticker(sym).history(period=period, interval='1d', timeout=15))
+                    if df is not None and len(df) >= 2:
+                        break
+                    last_err = "empty/short response"
+                    df = None
+                except Exception as e:
+                    last_err, df = str(e), None
+                time.sleep(0.5 * attempt)
+            if df is not None:
+                out[sym] = df
+            else:
+                failed.append(sym)
+                logger.warning(f"Global daily history FAILED for {sym} after {GLOBAL_FETCH_RETRIES} tries: {last_err}")
+    logger.info(f"Global daily history: loaded {len(out)}/{expected} indices; failed={failed}")
+    return out, expected, failed
 
-def historical_global_status(global_daily, target_date):
+def fetch_global_daily_history(period='400d'):
+    """Backward-compatible wrapper (returns only the data dict)."""
+    return fetch_global_daily_history_checked(period)[0]
+
+def historical_global_status_detail(global_daily, target_date):
     positive, total = 0, 0
     for sym, df in global_daily.items():
         try:
@@ -283,13 +319,177 @@ def historical_global_status(global_daily, target_date):
         except Exception:
             continue
     if total == 0:
-        return 'neutral'
+        return {'status': 'neutral', 'positive': 0, 'total': 0}
     ratio = positive / total
-    if ratio > 0.6:
-        return 'bullish'
-    if ratio < 0.4:
-        return 'bearish'
-    return 'neutral'
+    status = 'bullish' if ratio > 0.6 else ('bearish' if ratio < 0.4 else 'neutral')
+    return {'status': status, 'positive': positive, 'total': total}
+
+def historical_global_status(global_daily, target_date):
+    return historical_global_status_detail(global_daily, target_date)['status']
+
+def _global_store_github_path():
+    segments = [s.strip().strip('/') for s in (GITHUB_DATA_DIR, GLOBAL_STATUS_FILE)]
+    return "/".join(s for s in segments if s)
+
+def load_global_status_store():
+    """Returns (store_dict, github_sha). GitHub is primary, local file is the fallback."""
+    store, sha = {}, None
+    if github_configured():
+        content, sha = github_get_file(_global_store_github_path())
+        if content:
+            try:
+                store = json.loads(content)
+            except ValueError:
+                logger.warning("GLOBAL_STATUS.json on GitHub is not valid JSON; ignoring it")
+    if not store and os.path.exists(_GLOBAL_STORE_LOCAL_PATH):
+        try:
+            with open(_GLOBAL_STORE_LOCAL_PATH, 'r') as fh:
+                store = json.load(fh)
+        except (OSError, ValueError) as e:
+            logger.warning(f"Local global-status store unreadable: {e}")
+    return (store if isinstance(store, dict) else {}), sha
+
+def save_global_status_store(store, sha=None):
+    payload = json.dumps(store, indent=2, sort_keys=True)
+    try:
+        with open(_GLOBAL_STORE_LOCAL_PATH, 'w') as fh:
+            fh.write(payload)
+    except OSError as e:
+        logger.warning(f"Could not write local global-status store: {e}")
+    if github_configured():
+        try:
+            if sha is None:
+                _, sha = github_get_file(_global_store_github_path())
+            github_put_file(_global_store_github_path(), payload,
+                            f"Update frozen global statuses ({len(store)} days)", sha=sha)
+        except RuntimeError as e:
+            logger.warning(f"Could not save global-status store to GitHub: {e}")
+
+def _can_freeze_global_status(d):
+    freeze_at = datetime(d.year, d.month, d.day, tzinfo=IST) + timedelta(days=1, hours=GLOBAL_FREEZE_HOUR_IST)
+    return now_ist() >= freeze_at
+
+def resolve_global_status(global_daily, data_ok, d, store):
+    """Returns (status, source, changed). source: frozen | live | unknown."""
+    key = d.strftime('%Y-%m-%d')
+    saved = store.get(key)
+    if isinstance(saved, dict) and saved.get('status') in _VALID_GLOBAL_STATUS:
+        return saved['status'], 'frozen', False
+    if not data_ok:
+        return 'unknown', 'unknown', False
+    detail = historical_global_status_detail(global_daily, d)
+    if _can_freeze_global_status(d):
+        store[key] = {
+            'status': detail['status'], 'positive': detail['positive'], 'total': detail['total'],
+            'source': 'auto', 'frozenAt': now_ist().isoformat()
+        }
+        return detail['status'], 'frozen', True
+    return detail['status'], 'live', False
+
+# ---------------------------------------------------------------------------
+# Daily 09:20 IST global-status snapshot  ->  GitHub (market_data/GLOBAL_STATUS.json)
+#   * Runs from a background thread inside the app (set ENABLE_SCHEDULER=0 to disable)
+#   * Also callable on demand / from cron via GET|POST /api/global-status/snapshot
+#   * Idempotent: if today's snapshot already exists it is NOT overwritten (use ?force=1)
+# ---------------------------------------------------------------------------
+SNAPSHOT_HOUR, SNAPSHOT_MINUTE = 9, 20
+SNAPSHOT_CUTOFF_HOUR, SNAPSHOT_CUTOFF_MINUTE = 15, 30   # stop retrying after market close
+SNAPSHOT_ON_TIME_MINUTES = 10                            # captured within 10 min of 09:20 = on time
+SNAPSHOT_RETRY_SECONDS = 300
+SCHEDULER_ENABLED = _clean_env("ENABLE_SCHEDULER", default="1").lower() not in ("0", "false", "no", "off")
+_scheduler_started = False
+
+def _global_index_details(global_daily, target_date):
+    names = {sym: name for region in GLOBAL_INDICES.values() for sym, name in region.items()}
+    details = []
+    for sym, df in global_daily.items():
+        try:
+            asof = df[df.index.date <= target_date]
+            if len(asof) < 2:
+                continue
+            cur, prev = float(asof['Close'].iloc[-1]), float(asof['Close'].iloc[-2])
+            details.append({
+                'symbol': sym, 'name': names.get(sym, sym),
+                'barDate': asof.index[-1].strftime('%Y-%m-%d'),
+                'close': round(cur, 2), 'prevClose': round(prev, 2),
+                'changePct': round((cur - prev) / prev * 100, 2) if prev else 0.0
+            })
+        except Exception:
+            continue
+    return details
+
+def take_global_snapshot(force=False):
+    """Capture today's global status and store it (frozen) in GLOBAL_STATUS.json."""
+    now = now_ist()
+    today = now.date()
+    key = today.strftime('%Y-%m-%d')
+
+    if today.weekday() >= 5 and not force:
+        return {'status': 'skipped_weekend', 'date': key}
+
+    with _GLOBAL_STORE_LOCK:
+        store, _ = load_global_status_store()
+    if key in store and not force:
+        return {'status': 'already_exists', 'date': key, 'entry': store[key]}
+
+    global_daily, expected, failed = fetch_global_daily_history_checked()
+    if len(global_daily) < MIN_GLOBAL_SYMBOLS:
+        return {'status': 'failed', 'date': key, 'reason': 'too few global indices loaded',
+                'indicesLoaded': len(global_daily), 'indicesExpected': expected,
+                'minRequired': MIN_GLOBAL_SYMBOLS, 'failed': failed}
+
+    detail = historical_global_status_detail(global_daily, today)
+    target = now.replace(hour=SNAPSHOT_HOUR, minute=SNAPSHOT_MINUTE, second=0, microsecond=0)
+    late = now > target + timedelta(minutes=SNAPSHOT_ON_TIME_MINUTES)
+    entry = {
+        'status': detail['status'], 'positive': detail['positive'], 'total': detail['total'],
+        'source': 'morning_snapshot', 'capturedAt': now.isoformat(), 'late': bool(late),
+        'indicesFailed': failed, 'indices': _global_index_details(global_daily, today)
+    }
+    with _GLOBAL_STORE_LOCK:
+        store, sha = load_global_status_store()      # re-read so we never clobber concurrent edits
+        if key in store and not force:
+            return {'status': 'already_exists', 'date': key, 'entry': store[key]}
+        store[key] = entry
+        save_global_status_store(store, sha)
+    logger.info(f"Global snapshot saved for {key}: {entry['status']} ({entry['positive']}/{entry['total']} up)")
+    return {'status': 'ok', 'date': key, 'entry': entry}
+
+def _snapshot_scheduler_tick(state):
+    """One scheduler step (separate function so it can be tested). Returns the result or None."""
+    n = now_ist()
+    if n.weekday() >= 5 or state.get('done') == n.date():
+        return None
+    start = n.replace(hour=SNAPSHOT_HOUR, minute=SNAPSHOT_MINUTE, second=0, microsecond=0)
+    cutoff = n.replace(hour=SNAPSHOT_CUTOFF_HOUR, minute=SNAPSHOT_CUTOFF_MINUTE, second=0, microsecond=0)
+    if not (start <= n < cutoff):
+        return None
+    if time.time() - state.get('last_try', 0) < SNAPSHOT_RETRY_SECONDS:
+        return None
+    state['last_try'] = time.time()
+    res = take_global_snapshot()
+    if res['status'] in ('ok', 'already_exists', 'skipped_weekend'):
+        state['done'] = n.date()
+    else:
+        logger.warning(f"Global snapshot attempt failed, will retry in {SNAPSHOT_RETRY_SECONDS}s: {res}")
+    return res
+
+def _snapshot_scheduler_loop():
+    state = {}
+    logger.info(f"Global snapshot scheduler running (daily {SNAPSHOT_HOUR:02d}:{SNAPSHOT_MINUTE:02d} IST, Mon-Fri)")
+    while True:
+        try:
+            _snapshot_scheduler_tick(state)
+        except Exception:
+            logger.exception("Global snapshot scheduler error")
+        time.sleep(20)
+
+def start_snapshot_scheduler():
+    global _scheduler_started
+    if _scheduler_started or not SCHEDULER_ENABLED:
+        return
+    _scheduler_started = True
+    threading.Thread(target=_snapshot_scheduler_loop, name="global-snapshot", daemon=True).start()
 
 def _close_trade(trade, exit_price, status, exit_time):
     trade['status'] = status
@@ -439,7 +639,12 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         }
 
     daily_ohlc = _daily_ohlc_from_5m(intraday)
-    global_daily = fetch_global_daily_history()
+    global_daily, g_expected, g_failed = fetch_global_daily_history_checked()
+    g_data_ok = len(global_daily) >= MIN_GLOBAL_SYMBOLS
+    with _GLOBAL_STORE_LOCK:
+        global_store, global_store_sha = load_global_status_store()
+    global_store_dirty = False
+    global_unknown_dates, global_live_dates, global_frozen_used = [], [], 0
 
     trades = []
     setups_identified = 0
@@ -462,7 +667,14 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
 
         first = day_candles.iloc[0]
         rest = day_candles.iloc[1:]
-        global_status = historical_global_status(global_daily, d)
+        global_status, g_source, g_changed = resolve_global_status(global_daily, g_data_ok, d, global_store)
+        global_store_dirty = global_store_dirty or g_changed
+        if g_source == 'unknown':
+            global_unknown_dates.append(d.strftime('%Y-%m-%d'))
+        elif g_source == 'live':
+            global_live_dates.append(d.strftime('%Y-%m-%d'))
+        else:
+            global_frozen_used += 1
         first_close = float(first['Close'])
         first_high = float(first['High'])
         first_low = float(first['Low'])
@@ -512,9 +724,23 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         if trade:
             trades.append(trade)
 
+    if global_store_dirty:
+        with _GLOBAL_STORE_LOCK:
+            save_global_status_store(global_store, global_store_sha)
+
     return {
         "symbol": symbol,
         "symbolLabel": SYMBOL_LABELS.get(symbol, symbol),
+        "globalData": {
+            "indicesExpected": g_expected,
+            "indicesLoaded": len(global_daily),
+            "indicesFailed": g_failed,
+            "minRequired": MIN_GLOBAL_SYMBOLS,
+            "ok": g_data_ok,
+            "daysUsingFrozenStatus": global_frozen_used,
+            "daysUsingLiveStatus": global_live_dates,
+            "daysSkippedNoGlobalData": global_unknown_dates
+        },
         "trades": trades,
         "stats": _backtest_stats(trades),
         "daysAnalyzed": len(trading_dates) - 1,
@@ -1643,6 +1869,57 @@ def get_backtest():
         logger.exception("Backtest handler exception")
         return jsonify({'error': 'Backtest failed', 'details': str(e)}), 500
 
+@app.route('/api/global-status', methods=['GET', 'POST'])
+def global_status_store_endpoint():
+    """GET: list frozen global statuses.
+    POST {"date":"2026-09-29","status":"bearish"}: manually set/override a day (restores a lost trade).
+    POST {"date":"2026-09-29","delete":true}: remove a frozen day so it is recomputed next run.
+    If ADMIN_KEY is set on the server, POST needs ?key=<ADMIN_KEY>."""
+    try:
+        with _GLOBAL_STORE_LOCK:
+            store, sha = load_global_status_store()
+            if request.method == 'GET':
+                return jsonify({'frozenDays': len(store), 'store': store, 'timestamp': now_ist().isoformat()})
+
+            if GLOBAL_ADMIN_KEY and request.args.get('key') != GLOBAL_ADMIN_KEY:
+                return jsonify({'error': 'Unauthorized'}), 401
+            body = request.get_json(silent=True) or {}
+            date_str = str(body.get('date', '')).strip()
+            try:
+                datetime.strptime(date_str, '%Y-%m-%d')
+            except ValueError:
+                return jsonify({'error': 'date must be YYYY-MM-DD'}), 400
+
+            if body.get('delete'):
+                removed = store.pop(date_str, None) is not None
+                save_global_status_store(store, sha)
+                return jsonify({'date': date_str, 'removed': removed})
+
+            status = str(body.get('status', '')).lower()
+            if status not in _VALID_GLOBAL_STATUS:
+                return jsonify({'error': 'status must be bullish, bearish or neutral'}), 400
+            store[date_str] = {'status': status, 'source': 'manual', 'frozenAt': now_ist().isoformat()}
+            save_global_status_store(store, sha)
+            return jsonify({'date': date_str, 'status': status, 'source': 'manual'})
+    except Exception as e:
+        logger.exception("Global status endpoint exception")
+        return jsonify({'error': 'Global status endpoint failed', 'details': str(e)}), 500
+
+@app.route('/api/global-status/snapshot', methods=['GET', 'POST'])
+def global_status_snapshot_endpoint():
+    """Take (and store) today's global-status snapshot now. Safe to call from cron / GitHub Actions.
+    ?force=1 overwrites today's entry. If ADMIN_KEY is set on the server, pass ?key=<ADMIN_KEY>."""
+    try:
+        if GLOBAL_ADMIN_KEY and request.args.get('key') != GLOBAL_ADMIN_KEY:
+            return jsonify({'error': 'Unauthorized'}), 401
+        force = request.args.get('force', '').lower() in ('1', 'true', 'yes')
+        result = take_global_snapshot(force=force)
+        result['timestamp'] = now_ist().isoformat()
+        return jsonify(result), (503 if result['status'] == 'failed' else 200)
+    except Exception as e:
+        logger.exception("Global snapshot endpoint exception")
+        return jsonify({'error': 'Snapshot failed', 'details': str(e)}), 500
+
 # ---------------------------------------------------------------------------
 # NEW: File Download Endpoint
 # ---------------------------------------------------------------------------
@@ -1657,7 +1934,9 @@ def download_app():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'service': 'Indian Stock Market Predictor', 'version': '2.1.0-updated'})
+    return jsonify({'service': 'Indian Stock Market Predictor', 'version': '2.3.0-global-snapshot'})
+
+start_snapshot_scheduler()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
