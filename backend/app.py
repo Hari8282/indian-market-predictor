@@ -392,22 +392,45 @@ SCHEDULER_ENABLED = _clean_env("ENABLE_SCHEDULER", default="1").lower() not in (
 _scheduler_started = False
 
 def _global_index_details(global_daily, target_date):
+    """Fetches real-time intraday data for live snapshots; falls back to history if needed."""
     names = {sym: name for region in GLOBAL_INDICES.values() for sym, name in region.items()}
+    today_str = target_date.strftime('%Y-%m-%d')
     details = []
-    for sym, df in global_daily.items():
+
+    for sym, name in names.items():
         try:
-            asof = df[df.index.date <= target_date]
-            if len(asof) < 2:
-                continue
-            cur, prev = float(asof['Close'].iloc[-1]), float(asof['Close'].iloc[-2])
-            details.append({
-                'symbol': sym, 'name': names.get(sym, sym),
-                'barDate': asof.index[-1].strftime('%Y-%m-%d'),
-                'close': round(cur, 2), 'prevClose': round(prev, 2),
-                'changePct': round((cur - prev) / prev * 100, 2) if prev else 0.0
-            })
-        except Exception:
+            cur, prev = None, None
+            # Attempt live streaming fetch
+            try:
+                t = get_ticker(sym)
+                cur = t.fast_info.last_price
+                prev = t.fast_info.previous_close
+            except Exception as e:
+                logger.warning(f"Live ticker fast_info failed for {sym}: {e}")
+
+            # Fallback to daily historical bar if live streaming fetch failed
+            if cur is None or prev is None:
+                if sym in global_daily:
+                    df = global_daily[sym]
+                    asof = df[df.index.date <= target_date]
+                    if len(asof) >= 2:
+                        cur = float(asof['Close'].iloc[-1])
+                        prev = float(asof['Close'].iloc[-2])
+
+            if cur is not None and prev is not None and prev > 0:
+                change_pct = round(((cur - prev) / prev) * 100, 2)
+                details.append({
+                    'symbol': sym,
+                    'name': name,
+                    'barDate': today_str,
+                    'close': round(cur, 2),
+                    'prevClose': round(prev, 2),
+                    'changePct': change_pct
+                })
+        except Exception as err:
+            logger.warning(f"Could not compute index detail for {sym}: {err}")
             continue
+
     return details
 
 def take_global_snapshot(force=False):
@@ -425,24 +448,32 @@ def take_global_snapshot(force=False):
         return {'status': 'already_exists', 'date': key, 'entry': store[key]}
 
     global_daily, expected, failed = fetch_global_daily_history_checked()
-    if len(global_daily) < MIN_GLOBAL_SYMBOLS:
+    indices_details = _global_index_details(global_daily, today)
+    
+    if len(indices_details) < MIN_GLOBAL_SYMBOLS:
         return {'status': 'failed', 'date': key, 'reason': 'too few global indices loaded',
-                'indicesLoaded': len(global_daily), 'indicesExpected': expected,
+                'indicesLoaded': len(indices_details), 'indicesExpected': expected,
                 'minRequired': MIN_GLOBAL_SYMBOLS, 'failed': failed}
 
-    detail = historical_global_status_detail(global_daily, today)
+    # Count live positive changes from current intraday snapshot
+    positive_count = sum(1 for idx in indices_details if idx['changePct'] > 0)
+    total_count = len(indices_details)
+    ratio = positive_count / total_count if total_count > 0 else 0.5
+    status = 'bullish' if ratio > 0.6 else ('bearish' if ratio < 0.4 else 'neutral')
+
     target = now.replace(hour=SNAPSHOT_HOUR, minute=SNAPSHOT_MINUTE, second=0, microsecond=0)
     late = now > target + timedelta(minutes=SNAPSHOT_ON_TIME_MINUTES)
     entry = {
-        'status': detail['status'],
-        'positive': detail['positive'],
-        'total': detail['total'],
+        'status': status,
+        'positive': positive_count,
+        'total': total_count,
         'source': 'morning_snapshot_0915',
         'capturedAt': now.isoformat(),
         'late': bool(late),
         'indicesFailed': failed,
-        'indices': _global_index_details(global_daily, today)
+        'indices': indices_details
     }
+
     with _GLOBAL_STORE_LOCK:
         store, sha = load_global_status_store()
         if key in store and not force:
