@@ -1,6 +1,7 @@
 """
 Indian Stock Market Predictor - Multi-Timeframe Backend
 Real-time data with multiple timeframe support - Patched for curl_cffi / yfinance cookie crash
+Updated with Daily 09:15 IST Global Index Status Snapshot & History Tracker for Backtesting
 """
 
 from flask import Flask, jsonify, request, send_file
@@ -258,10 +259,6 @@ def load_5m_history(symbol):
 
 # ---------------------------------------------------------------------------
 # Global-market status: retry-safe fetch + frozen per-date store
-#   * Every download is retried and failures are reported (never silently skipped)
-#   * If too few indices load, new statuses are NOT computed ('unknown' -> no trade)
-#   * A past day's status is computed once, frozen, and never recalculated, so
-#     a backtest of an old date gives the same answer on every run.
 # ---------------------------------------------------------------------------
 GLOBAL_STATUS_FILE = "GLOBAL_STATUS.json"
 GLOBAL_FETCH_RETRIES = 3
@@ -269,7 +266,7 @@ try:
     MIN_GLOBAL_SYMBOLS = int(_clean_env("MIN_GLOBAL_SYMBOLS", default="8"))
 except ValueError:
     MIN_GLOBAL_SYMBOLS = 8
-GLOBAL_FREEZE_HOUR_IST = 4          # freeze a day only after 04:00 IST next morning (US close is final)
+GLOBAL_FREEZE_HOUR_IST = 4          # freeze a day only after 04:00 IST next morning
 GLOBAL_ADMIN_KEY = _clean_env("ADMIN_KEY", default=None) or None
 _VALID_GLOBAL_STATUS = ('bullish', 'bearish', 'neutral')
 _GLOBAL_STORE_LOCK = threading.Lock()
@@ -301,7 +298,6 @@ def fetch_global_daily_history_checked(period='400d'):
     return out, expected, failed
 
 def fetch_global_daily_history(period='400d'):
-    """Backward-compatible wrapper (returns only the data dict)."""
     return fetch_global_daily_history_checked(period)[0]
 
 def historical_global_status_detail(global_daily, target_date):
@@ -332,7 +328,6 @@ def _global_store_github_path():
     return "/".join(s for s in segments if s)
 
 def load_global_status_store():
-    """Returns (store_dict, github_sha). GitHub is primary, local file is the fallback."""
     store, sha = {}, None
     if github_configured():
         content, sha = github_get_file(_global_store_github_path())
@@ -387,14 +382,11 @@ def resolve_global_status(global_daily, data_ok, d, store):
     return detail['status'], 'live', False
 
 # ---------------------------------------------------------------------------
-# Daily 09:20 IST global-status snapshot  ->  GitHub (market_data/GLOBAL_STATUS.json)
-#   * Runs from a background thread inside the app (set ENABLE_SCHEDULER=0 to disable)
-#   * Also callable on demand / from cron via GET|POST /api/global-status/snapshot
-#   * Idempotent: if today's snapshot already exists it is NOT overwritten (use ?force=1)
+# Daily 09:15 IST global-status snapshot -> GitHub (market_data/GLOBAL_STATUS.json)
 # ---------------------------------------------------------------------------
-SNAPSHOT_HOUR, SNAPSHOT_MINUTE = 9, 20
-SNAPSHOT_CUTOFF_HOUR, SNAPSHOT_CUTOFF_MINUTE = 15, 30   # stop retrying after market close
-SNAPSHOT_ON_TIME_MINUTES = 10                            # captured within 10 min of 09:20 = on time
+SNAPSHOT_HOUR, SNAPSHOT_MINUTE = 9, 15                  # Triggered at 09:15 IST
+SNAPSHOT_CUTOFF_HOUR, SNAPSHOT_CUTOFF_MINUTE = 15, 30   # Stop retrying after market close
+SNAPSHOT_ON_TIME_MINUTES = 10                            # Captured within 10 min of 09:15 IST
 SNAPSHOT_RETRY_SECONDS = 300
 SCHEDULER_ENABLED = _clean_env("ENABLE_SCHEDULER", default="1").lower() not in ("0", "false", "no", "off")
 _scheduler_started = False
@@ -419,7 +411,7 @@ def _global_index_details(global_daily, target_date):
     return details
 
 def take_global_snapshot(force=False):
-    """Capture today's global status and store it (frozen) in GLOBAL_STATUS.json."""
+    """Capture today's global status at 09:15 IST and store it (frozen) in GLOBAL_STATUS.json for backtesting."""
     now = now_ist()
     today = now.date()
     key = today.strftime('%Y-%m-%d')
@@ -442,17 +434,22 @@ def take_global_snapshot(force=False):
     target = now.replace(hour=SNAPSHOT_HOUR, minute=SNAPSHOT_MINUTE, second=0, microsecond=0)
     late = now > target + timedelta(minutes=SNAPSHOT_ON_TIME_MINUTES)
     entry = {
-        'status': detail['status'], 'positive': detail['positive'], 'total': detail['total'],
-        'source': 'morning_snapshot', 'capturedAt': now.isoformat(), 'late': bool(late),
-        'indicesFailed': failed, 'indices': _global_index_details(global_daily, today)
+        'status': detail['status'],
+        'positive': detail['positive'],
+        'total': detail['total'],
+        'source': 'morning_snapshot_0915',
+        'capturedAt': now.isoformat(),
+        'late': bool(late),
+        'indicesFailed': failed,
+        'indices': _global_index_details(global_daily, today)
     }
     with _GLOBAL_STORE_LOCK:
-        store, sha = load_global_status_store()      # re-read so we never clobber concurrent edits
+        store, sha = load_global_status_store()
         if key in store and not force:
             return {'status': 'already_exists', 'date': key, 'entry': store[key]}
         store[key] = entry
         save_global_status_store(store, sha)
-    logger.info(f"Global snapshot saved for {key}: {entry['status']} ({entry['positive']}/{entry['total']} up)")
+    logger.info(f"09:15 IST Global snapshot saved for {key}: {entry['status']} ({entry['positive']}/{entry['total']} up)")
     return {'status': 'ok', 'date': key, 'entry': entry}
 
 def _snapshot_scheduler_tick(state):
@@ -579,26 +576,17 @@ def _daily_ohlc_from_5m(intraday_df):
 
 ENTRY_RANGE_MIN = 0.40
 ENTRY_RANGE_MAX = 0.60
-STOP_LOSS_BUFFER_PCT = 0.1  # percent; buffer = 0.1% of the entry candle's High/Low (per signal direction)
+STOP_LOSS_BUFFER_PCT = 0.1
 
-# ---------------------------------------------------------------------------
-# UPDATED: Multi-Tier Trailing Stop Definitions
-# ---------------------------------------------------------------------------
 TRAIL_TIERS = [
-    {"trigger": 1.5, "lock": 0.0},  # > 1.5R profit -> Stop = Entry (0R)
-    {"trigger": 2.0, "lock": 0.5},  # > 2.0R profit -> Stop = +0.5R
-    {"trigger": 3.0, "lock": 1.5},  # > 3.0R profit -> Stop = +1.5R
-    {"trigger": 4.0, "lock": 3.0},  # > 4.0R profit -> Stop = +3.0R
+    {"trigger": 1.5, "lock": 0.0},
+    {"trigger": 2.0, "lock": 0.5},
+    {"trigger": 3.0, "lock": 1.5},
+    {"trigger": 4.0, "lock": 3.0},
 ]
 EXTENDED_TARGET_R = 10.0
 
 def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_pct=STOP_LOSS_BUFFER_PCT):
-    """
-    Stop loss buffer is 0.1% (configurable) of the entry candle's High/Low,
-    applied on the side of the candle that matches the signal direction:
-    - BUY: buffer below the entry candle's Low
-    - SELL: buffer above the entry candle's High
-    """
     if signal == 'BUY':
         low = float(entry_row['Low'])
         buffer_points = low * (buffer_pct / 100.0)
@@ -626,7 +614,7 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         return {
             "symbol": symbol, "trades": [], "stats": _backtest_stats([]),
             "daysAnalyzed": 0, "setupsIdentified": 0, "dataSource": "unavailable",
-            "note": "No 5m history available yet. Run /api/history/sync first (requires GITHUB_TOKEN/GITHUB_REPO), or wait for the live fallback to have data."
+            "note": "No 5m history available yet."
         }
 
     cutoff = now_ist() - timedelta(days=days)
@@ -755,21 +743,9 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         }
     }
 
-# ---------------------------------------------------------------------------
-# UPDATED: Multi-Tier Trailing Simulation Logic
-# ---------------------------------------------------------------------------
 def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, trade_date,
                      global_status, first_candle_label,
                      trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
-    """
-    Walk forward through the rest of the day's candles to find the exit.
-
-    Multi-tier trailing stop loss:
-      - > 1.5R -> Stop moved to Entry (0R)
-      - > 2.0R -> Stop moved to +0.5R
-      - > 3.0R -> Stop moved to +1.5R
-      - > 4.0R -> Stop moved to +3.0R
-    """
     if trail_tiers is None:
         trail_tiers = TRAIL_TIERS
 
@@ -800,7 +776,7 @@ def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, 
                             trailed = True
                         break
 
-        else:  # SELL
+        else:
             if high >= current_stop:
                 exit_price, exit_reason, exit_time = current_stop, ('TRAILED_STOP' if trailed else 'STOPPED_OUT'), t
                 break
@@ -1871,10 +1847,6 @@ def get_backtest():
 
 @app.route('/api/global-status', methods=['GET', 'POST'])
 def global_status_store_endpoint():
-    """GET: list frozen global statuses.
-    POST {"date":"2026-09-29","status":"bearish"}: manually set/override a day (restores a lost trade).
-    POST {"date":"2026-09-29","delete":true}: remove a frozen day so it is recomputed next run.
-    If ADMIN_KEY is set on the server, POST needs ?key=<ADMIN_KEY>."""
     try:
         with _GLOBAL_STORE_LOCK:
             store, sha = load_global_status_store()
@@ -1907,8 +1879,6 @@ def global_status_store_endpoint():
 
 @app.route('/api/global-status/snapshot', methods=['GET', 'POST'])
 def global_status_snapshot_endpoint():
-    """Take (and store) today's global-status snapshot now. Safe to call from cron / GitHub Actions.
-    ?force=1 overwrites today's entry. If ADMIN_KEY is set on the server, pass ?key=<ADMIN_KEY>."""
     try:
         if GLOBAL_ADMIN_KEY and request.args.get('key') != GLOBAL_ADMIN_KEY:
             return jsonify({'error': 'Unauthorized'}), 401
@@ -1920,12 +1890,8 @@ def global_status_snapshot_endpoint():
         logger.exception("Global snapshot endpoint exception")
         return jsonify({'error': 'Snapshot failed', 'details': str(e)}), 500
 
-# ---------------------------------------------------------------------------
-# NEW: File Download Endpoint
-# ---------------------------------------------------------------------------
 @app.route('/api/download-app', methods=['GET'])
 def download_app():
-    """Allows downloading the current source code file."""
     try:
         return send_file(__file__, as_attachment=True, download_name="app.py")
     except Exception as e:
@@ -1934,7 +1900,7 @@ def download_app():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'service': 'Indian Stock Market Predictor', 'version': '2.3.0-global-snapshot'})
+    return jsonify({'service': 'Indian Stock Market Predictor', 'version': '2.3.1-0915-snapshot'})
 
 start_snapshot_scheduler()
 
