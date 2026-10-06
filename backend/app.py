@@ -607,12 +607,6 @@ def _daily_ohlc_from_5m(intraday_df):
 
 ENTRY_RANGE_MIN = 0.40
 ENTRY_RANGE_MAX = 0.60
-# First-candle filter: body must be MORE than this fraction of the candle's high-low range.
-# (Replaces the old "first candle must be green/red" rule.) Override with env FIRST_CANDLE_BODY_MIN_PCT (e.g. 60).
-try:
-    FIRST_CANDLE_BODY_MIN = float(_clean_env("FIRST_CANDLE_BODY_MIN_PCT", default="60")) / 100.0
-except ValueError:
-    FIRST_CANDLE_BODY_MIN = 0.60
 STOP_LOSS_BUFFER_PCT = 0.1
 
 TRAIL_TIERS = [
@@ -705,15 +699,14 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         first_low = float(first['Low'])
         first_range = first_high - first_low
 
-        first_open = float(first['Open'])
-        first_body_ratio = (abs(first_close - first_open) / first_range) if first_range > 0 else 0.0
-        first_body_ok = first_body_ratio > FIRST_CANDLE_BODY_MIN      # body > 60% of candle range
+        first_green = first_close > float(first['Open'])
+        first_red = first_close < float(first['Open'])
         above_tc = first_close > tc
         below_bc = first_close < bc
-        first_candle_label = 'green' if first_close > first_open else ('red' if first_close < first_open else 'flat')  # info only
+        first_candle_label = 'green' if first_green else ('red' if first_red else 'flat')
 
         trade = None
-        if global_status == 'bullish' and first_body_ok and above_tc:
+        if global_status == 'bullish' and first_green and above_tc:
             setups_identified += 1
             entry_zone_low = first_low + ENTRY_RANGE_MIN * first_range
             entry_zone_high = first_low + ENTRY_RANGE_MAX * first_range
@@ -730,7 +723,7 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
                         trade = _simulate_trade(day_candles, entry_time, 'BUY', entry, stop, target, risk, d, global_status, first_candle_label,
                                                  trail_tiers, extended_target_r)
 
-        elif global_status == 'bearish' and first_body_ok and below_bc:
+        elif global_status == 'bearish' and first_red and below_bc:
             setups_identified += 1
             entry_zone_low = first_high - ENTRY_RANGE_MAX * first_range
             entry_zone_high = first_high - ENTRY_RANGE_MIN * first_range
@@ -748,7 +741,6 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
                                                  trail_tiers, extended_target_r)
 
         if trade:
-            trade['firstCandleBodyPct'] = round(first_body_ratio * 100, 1)
             trades.append(trade)
 
     if global_store_dirty:
@@ -774,7 +766,6 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         "setupsIdentified": setups_identified,
         "dataSource": data_source,
         "entryRangeZone": {"min": ENTRY_RANGE_MIN, "max": ENTRY_RANGE_MAX},
-        "firstCandleBodyMinPct": round(FIRST_CANDLE_BODY_MIN * 100, 1),
         "stopLossBufferPct": stop_buffer,
         "trailing": {"tiers": trail_tiers, "extendedTargetR": extended_target_r},
         "historyRange": {
