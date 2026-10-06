@@ -607,7 +607,7 @@ def _daily_ohlc_from_5m(intraday_df):
 
 ENTRY_RANGE_MIN = 0.40
 ENTRY_RANGE_MAX = 0.60
-FIRST_CANDLE_BODY_MIN_PCT = 70.0  # Body must be strictly greater than 70% of total candle range
+FIRST_CANDLE_BODY_MIN_PCT = 60.0  # Body must be strictly greater than 60% of total candle range
 STOP_LOSS_BUFFER_PCT = 0.1
 
 TRAIL_TIERS = [
@@ -701,7 +701,7 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         first_low = float(first['Low'])
         first_range = first_high - first_low
 
-        # Filter: only trade when the first candle's real body is >70% of
+        # Filter: only trade when the first candle's real body is >60% of
         # its full high-low range (combined upper and lower wicks are <30%).
         first_body = abs(first_close - first_open)
         first_body_pct = (first_body / first_range * 100.0) if first_range > 0 else 0.0
@@ -777,7 +777,7 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         "dataSource": data_source,
         "entryRangeZone": {"min": ENTRY_RANGE_MIN, "max": ENTRY_RANGE_MAX},
         "firstCandleBodyMinPct": FIRST_CANDLE_BODY_MIN_PCT,
-        "firstCandleBodyRule": "first candle real body > 70% of total high-low range (combined wicks < 30%)",
+        "firstCandleBodyRule": "first candle real body > 60% of total high-low range (combined wicks < 30%)",
         "stopLossBufferPct": stop_buffer,
         "trailing": {"tiers": trail_tiers, "extendedTargetR": extended_target_r},
         "historyRange": {
