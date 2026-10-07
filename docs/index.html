@@ -993,6 +993,11 @@
                 <div id="historyStatusLine" style="font-size:12px;color:#94a3b8;margin-bottom:12px;">Checking archived history...</div>
 
                 <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
+                    <select id="backtestStrategy" onchange="updateBacktestStrategyHelp()" style="background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px 10px;font-size:12px;">
+                        <option value="existing" selected>Existing Strategy</option>
+                        <option value="rcbo">RCBO — Red Candle Breakout</option>
+                    </select>
+
                     <select id="backtestSymbol" style="background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px 10px;font-size:12px;">
                         <option value="nifty">NIFTY 50</option>
                         <option value="banknifty">BANK NIFTY</option>
@@ -1005,6 +1010,7 @@
                     </select>
                     <button class="journal-refresh-btn" onclick="runBacktest()">Run Backtest</button>
                 </div>
+                <div id="backtestStrategyHelp" style="font-size:12px;color:#94a3b8;margin:-4px 0 12px;">Existing Strategy: current production backtest logic. RCBO runs independently and does not modify it.</div>
 
                 <div class="journal-stats" id="backtestStats" style="grid-template-columns:repeat(8,minmax(0,1fr));">
                     <div class="journal-stat"><span>Days</span><strong id="btStatDays">--</strong></div>
@@ -1022,6 +1028,7 @@
                     <table class="journal-table" id="backtestTable">
                         <thead>
                             <tr>
+                                <th>Strategy</th>
                                 <th>Date</th>
                                 <th>Global</th>
                                 <th>Signal</th>
@@ -1037,7 +1044,7 @@
                             </tr>
                         </thead>
                         <tbody id="backtestTableBody">
-                            <tr><td colspan="12" class="journal-empty">Choose a symbol/range and click "Run Backtest".</td></tr>
+                            <tr><td colspan="13" class="journal-empty">Choose a strategy, symbol/range and click "Run Backtest".</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1129,10 +1136,20 @@ function getHistorySyncUrl() {
     return `${base}/api/history/sync?symbol=all`;
 }
 
-function getBacktestUrl(symbol, days) {
+function getBacktestUrl(symbol, days, strategy = 'existing') {
     const base = normalizeApiBase(API_BASE_URL);
-    return `${base}/api/backtest?symbol=${encodeURIComponent(symbol)}&days=${encodeURIComponent(days)}`;
+    const path = strategy === 'rcbo' ? '/api/backtest/rcbo' : '/api/backtest';
+    return `${base}${path}?symbol=${encodeURIComponent(symbol)}&days=${encodeURIComponent(days)}`;
 }
+
+        function updateBacktestStrategyHelp() {
+            const strategy = document.getElementById('backtestStrategy')?.value || 'existing';
+            const help = document.getElementById('backtestStrategyHelp');
+            if (!help) return;
+            help.textContent = strategy === 'rcbo'
+                ? 'RCBO: first 5m candle must be red; enter on the first later close above its high; reject breakouts directly into CPR TC/PDH resistance; use entry-candle low or PDH for large entry candles; existing trailing/target tiers apply.'
+                : 'Existing Strategy: current production backtest logic. RCBO runs independently and does not modify it.';
+        }
 
 function setConnection(connected, message) {
     const statusIndicator = document.getElementById('statusIndicator');
@@ -1482,7 +1499,7 @@ function setConnection(connected, message) {
                         <td>${safeString(t.symbolLabel || t.symbol, '--')}</td>
                         <td><span class="journal-signal-badge ${sig}">${safeUpper(t.signal)}</span></td>
                         <td>${t.entry ?? '--'}</td>
-                        <td>${t.stopLoss ?? '--'}</td>
+                        <td>${t.stopLoss ?? '--'}${t.stopReason ? `<small style="display:block;color:#94a3b8;">${safeString(t.stopReason, '')}</small>` : ''}</td>
                         <td>${t.target ?? '--'}</td>
                         <td>${(t.riskReward !== undefined && t.riskReward !== null) ? `1:${t.riskReward}` : '--'}</td>
                         <td><span class="journal-status-badge ${st.cls}">${st.label}</span></td>
@@ -1526,20 +1543,21 @@ function setConnection(connected, message) {
         }
 
         async function runBacktest() {
+            const strategy = document.getElementById('backtestStrategy')?.value || 'existing';
             const symbol = document.getElementById('backtestSymbol')?.value || 'nifty';
             const days = document.getElementById('backtestDays')?.value || '100';
             const body = document.getElementById('backtestTableBody');
             const note = document.getElementById('backtestNote');
-            if (body) body.innerHTML = '<tr><td colspan="12" class="journal-empty">Running backtest...</td></tr>';
+            if (body) body.innerHTML = '<tr><td colspan="13" class="journal-empty">Running backtest...</td></tr>';
             if (note) note.textContent = '';
             try {
-                const res = await fetch(getBacktestUrl(symbol, days));
+                const res = await fetch(getBacktestUrl(symbol, days, strategy));
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
                 renderBacktestResults(data);
             } catch (e) {
                 console.warn('Backtest fetch failed:', e);
-                if (body) body.innerHTML = `<tr><td colspan="12" class="journal-empty">Backtest failed: ${e.message}</td></tr>`;
+                if (body) body.innerHTML = `<tr><td colspan="13" class="journal-empty">Backtest failed: ${e.message}</td></tr>`;
             }
         }
 
@@ -1580,12 +1598,18 @@ function setConnection(connected, message) {
                 if (data.dataSource === 'live_fallback_max_60d') bits.push('Using live data (max ~60 days available — sync to GitHub to build a longer archive).');
                 if (data.dataSource === 'unavailable') bits.push(data.note || 'No data available.');
                 if (data.historyRange) bits.push(`Data range analyzed: ${data.historyRange.from} → ${data.historyRange.to} (${data.daysAnalyzed} days).`);
+                if (data.strategy === 'RCBO' && data.filters) {
+                    bits.push(`RCBO filters: ${data.filters.rejectedFirstCandleNotRed ?? 0} non-red first candles, ${data.filters.rejectedDirectResistance ?? 0} resistance rejections, ${data.filters.rejectedInvalidStop ?? 0} invalid-stop rejections.`);
+                }
+                if (data.strategy === 'RCBO' && data.rcboRules) {
+                    bits.push(`SL: ${data.rcboRules.stopNormal}; large entry candle: ${data.rcboRules.stopLargeEntry}; trailing: existing configured tiers.`);
+                }
                 note.textContent = bits.join(' ');
             }
 
             const trades = Array.isArray(data.trades) ? data.trades : [];
             if (trades.length === 0) {
-                body.innerHTML = '<tr><td colspan="12" class="journal-empty">No qualifying setups found in this range.</td></tr>';
+                body.innerHTML = '<tr><td colspan="13" class="journal-empty">No qualifying setups found in this range.</td></tr>';
                 return;
             }
 
@@ -1599,6 +1623,7 @@ function setConnection(connected, message) {
                 const rr = (t.riskReward !== undefined && t.riskReward !== null) ? `${t.riskReward > 0 ? '+' : ''}${t.riskReward}R` : '--';
                 return `
                     <tr>
+                        <td><span class="journal-signal-badge ${data.strategy === 'RCBO' ? 'buy' : 'changed'}">${safeUpper(data.strategyLabel || data.strategy || 'Existing')}</span></td>
                         <td>${safeString(t.date, '--')}</td>
                         <td><span class="journal-signal-badge ${globalCls}">${safeUpper(t.globalStatus)}</span></td>
                         <td><span class="journal-signal-badge ${sigCls}">${safeUpper(t.signal)}</span></td>
@@ -2098,6 +2123,7 @@ function setConnection(connected, message) {
             fetchMarketData();
             fetchSignalLog();
             fetchHistoryStatus();
+            updateBacktestStrategyHelp();
         });
         
         window.addEventListener('resize', () => {
