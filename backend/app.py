@@ -774,6 +774,208 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         }
     }
 
+# ---------------------------------------------------------------------------
+# RCBO (Red Candle Breakout) backtest -- isolated from the existing strategy
+# ---------------------------------------------------------------------------
+RCBO_CPR_BUFFER_PCT = 0.15
+RCBO_PDH_BUFFER_PCT = 0.15
+RCBO_MAX_ENTRY_CANDLE_MULTIPLIER = 1.50
+
+
+def _rcbo_resistance_blocks_entry(first_high, entry, tc, pdh):
+    """Reject a long RCBO when the breakout closes directly into major resistance."""
+    levels = []
+    for name, level in (("CPR TC", tc), ("PDH", pdh)):
+        if level is None or not np.isfinite(level):
+            continue
+        level = float(level)
+        # Resistance is relevant only when it sits at/above the first-candle high.
+        if level < first_high:
+            continue
+        buffer_pct = RCBO_CPR_BUFFER_PCT if name == "CPR TC" else RCBO_PDH_BUFFER_PCT
+        buffer = max(abs(level) * buffer_pct / 100.0, 0.01)
+        if entry <= level + buffer:
+            levels.append({"name": name, "level": round(level, 2)})
+    return levels
+
+
+def run_rcbo_backtest(symbol, days=100, min_rr=2.0, stop_buffer=STOP_LOSS_BUFFER_PCT,
+                      trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
+    """Backtest the independent 5-minute Red Candle Breakout (RCBO) strategy.
+
+    Rules:
+      1. First 5m candle must be bearish (Close < Open).
+      2. Long entry on the first subsequent candle that closes above first-candle high.
+      3. Reject breakout if it closes directly into CPR TC or PDH resistance.
+      4. SL = entry-candle low; if the entry candle is unusually large (>1.5x first
+         candle range), use PDH when PDH is a valid level below entry.
+      5. Target and trailing use the same simulator/tier configuration as the
+         existing backtest. The existing /api/backtest strategy is untouched.
+    """
+    if trail_tiers is None:
+        trail_tiers = TRAIL_TIERS
+
+    intraday = load_5m_history(symbol)
+    data_source = 'github_archive'
+    if intraday is None or len(intraday) == 0:
+        intraday = fetch_5m_history_chunked(symbol, days=60)
+        data_source = 'live_fallback_max_60d'
+    if intraday is None or len(intraday) == 0:
+        return {
+            "strategy": "RCBO",
+            "symbol": symbol,
+            "symbolLabel": SYMBOL_LABELS.get(symbol, symbol),
+            "trades": [], "stats": _backtest_stats([]),
+            "daysAnalyzed": 0, "setupsIdentified": 0,
+            "dataSource": "unavailable",
+            "note": "No 5m history available yet."
+        }
+
+    cutoff = now_ist() - timedelta(days=days)
+    intraday = intraday[intraday.index >= cutoff]
+    if len(intraday) == 0:
+        return {
+            "strategy": "RCBO", "symbol": symbol,
+            "symbolLabel": SYMBOL_LABELS.get(symbol, symbol),
+            "trades": [], "stats": _backtest_stats([]),
+            "daysAnalyzed": 0, "setupsIdentified": 0,
+            "dataSource": data_source,
+            "note": "No candles fall within the requested day range."
+        }
+
+    daily_ohlc = _daily_ohlc_from_5m(intraday)
+    trades = []
+    setups_identified = 0
+    rejected_resistance = 0
+    rejected_flat_or_green = 0
+    rejected_invalid_stop = 0
+    trading_dates = sorted(set(intraday.index.date))
+
+    for i, d in enumerate(trading_dates):
+        if i == 0:
+            continue
+        prev_date = trading_dates[i - 1]
+        if prev_date not in daily_ohlc.index:
+            continue
+
+        prev = daily_ohlc.loc[prev_date]
+        pdh = float(prev['High'])
+        pivot = (float(prev['High']) + float(prev['Low']) + float(prev['Close'])) / 3.0
+        bc = (float(prev['High']) + float(prev['Low'])) / 2.0
+        tc = (pivot - bc) + pivot
+
+        day_candles = intraday[intraday.index.date == d]
+        if len(day_candles) < 2:
+            continue
+
+        first = day_candles.iloc[0]
+        first_open = float(first['Open'])
+        first_high = float(first['High'])
+        first_low = float(first['Low'])
+        first_close = float(first['Close'])
+        first_range = first_high - first_low
+
+        if first_close >= first_open or first_range <= 0:
+            rejected_flat_or_green += 1
+            continue
+
+        setups_identified += 1
+        rest = day_candles.iloc[1:]
+        breakout = rest[rest['Close'] > first_high]
+        if len(breakout) == 0:
+            continue
+
+        entry_row = breakout.iloc[0]
+        entry_time = breakout.index[0]
+        entry = float(entry_row['Close'])
+
+        blocked_levels = _rcbo_resistance_blocks_entry(first_high, entry, tc, pdh)
+        if blocked_levels:
+            rejected_resistance += 1
+            continue
+
+        entry_range = float(entry_row['High']) - float(entry_row['Low'])
+        entry_candle_too_large = entry_range > (first_range * RCBO_MAX_ENTRY_CANDLE_MULTIPLIER)
+
+        entry_low_stop = float(entry_row['Low'])
+        low_buffer = entry_low_stop * (stop_buffer / 100.0)
+        stop_from_entry_candle = entry_low_stop - low_buffer
+
+        # User-requested PDH fallback for an unusually large entry candle.
+        # PDH must be below entry to be a valid long stop; otherwise use entry low.
+        if entry_candle_too_large and pdh < entry:
+            stop = pdh
+            stop_reason = 'PDH (large entry candle)'
+        else:
+            stop = stop_from_entry_candle
+            stop_reason = 'Entry candle low'
+            if entry_candle_too_large and pdh >= entry:
+                stop_reason += '; PDH invalid below entry'
+
+        if stop is None or stop >= entry:
+            rejected_invalid_stop += 1
+            continue
+
+        risk = entry - stop
+        if risk <= 0:
+            rejected_invalid_stop += 1
+            continue
+
+        target = round(entry + risk * min_rr, 2)
+        trade = _simulate_trade(
+            day_candles, entry_time, 'BUY', entry, stop, target, risk, d,
+            'neutral', 'red', trail_tiers, extended_target_r
+        )
+        trade.update({
+            'strategy': 'RCBO',
+            'triggerHigh': round(first_high, 2),
+            'firstCandleOpen': round(first_open, 2),
+            'firstCandleClose': round(first_close, 2),
+            'firstCandleRange': round(first_range, 2),
+            'entryCandleRange': round(entry_range, 2),
+            'entryCandleTooLarge': bool(entry_candle_too_large),
+            'stopReason': stop_reason,
+            'pdh': round(pdh, 2),
+            'cprPivot': round(pivot, 2),
+            'cprTC': round(tc, 2),
+            'cprBC': round(bc, 2),
+            'resistanceFilter': 'PASS'
+        })
+        trades.append(trade)
+
+    return {
+        "strategy": "RCBO",
+        "strategyLabel": "Red Candle Breakout",
+        "symbol": symbol,
+        "symbolLabel": SYMBOL_LABELS.get(symbol, symbol),
+        "trades": trades,
+        "stats": _backtest_stats(trades),
+        "daysAnalyzed": max(0, len(trading_dates) - 1),
+        "setupsIdentified": setups_identified,
+        "dataSource": data_source,
+        "rcboRules": {
+            "timeframe": "5m",
+            "firstCandle": "bearish (Close < Open)",
+            "entry": "first subsequent close > first candle high",
+            "cprResistanceFilterPct": RCBO_CPR_BUFFER_PCT,
+            "pdhResistanceFilterPct": RCBO_PDH_BUFFER_PCT,
+            "largeEntryCandleMultiplier": RCBO_MAX_ENTRY_CANDLE_MULTIPLIER,
+            "stopNormal": "entry candle low minus configured buffer",
+            "stopLargeEntry": "PDH when PDH < entry, otherwise entry candle low",
+            "targetR": min_rr
+        },
+        "filters": {
+            "rejectedFirstCandleNotRed": rejected_flat_or_green,
+            "rejectedDirectResistance": rejected_resistance,
+            "rejectedInvalidStop": rejected_invalid_stop
+        },
+        "trailing": {"tiers": trail_tiers, "extendedTargetR": extended_target_r},
+        "historyRange": {
+            "from": intraday.index[0].strftime('%Y-%m-%d'),
+            "to": intraday.index[-1].strftime('%Y-%m-%d')
+        }
+    }
+
 def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, trade_date,
                      global_status, first_candle_label,
                      trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
@@ -1875,6 +2077,29 @@ def get_backtest():
     except Exception as e:
         logger.exception("Backtest handler exception")
         return jsonify({'error': 'Backtest failed', 'details': str(e)}), 500
+
+@app.route('/api/backtest/rcbo', methods=['GET'])
+def get_rcbo_backtest():
+    """Independent RCBO backtest endpoint; does not alter /api/backtest."""
+    try:
+        symbol = _resolve_symbols_param(request.args.get('symbol', 'nifty'))[0]
+        try:
+            days = max(1, min(HISTORY_RETENTION_DAYS, int(request.args.get('days', HISTORY_RETENTION_DAYS))))
+        except (TypeError, ValueError):
+            days = HISTORY_RETENTION_DAYS
+
+        result = run_rcbo_backtest(
+            symbol,
+            days=days,
+            stop_buffer=STOP_LOSS_BUFFER_PCT,
+            trail_tiers=TRAIL_TIERS,
+            extended_target_r=EXTENDED_TARGET_R
+        )
+        result['timestamp'] = now_ist().isoformat()
+        return jsonify(result)
+    except Exception as e:
+        logger.exception("RCBO backtest handler exception")
+        return jsonify({'error': 'RCBO backtest failed', 'details': str(e)}), 500
 
 @app.route('/api/global-status', methods=['GET', 'POST'])
 def global_status_store_endpoint():
