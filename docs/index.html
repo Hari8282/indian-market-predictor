@@ -993,11 +993,24 @@
                 <div id="historyStatusLine" style="font-size:12px;color:#94a3b8;margin-bottom:12px;">Checking archived history...</div>
 
                 <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
-                    <select id="backtestStrategy" onchange="updateBacktestStrategyHelp()" style="background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px 10px;font-size:12px;">
+                    <select id="backtestStrategy" onchange="updateBacktestStrategyHelp()" style="background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px 10px;font-size:12px;max-width:310px;">
                         <option value="existing" selected>Existing Strategy</option>
+                        <option value="od">OD — Open Drive</option>
+                        <option value="odr">ODR — Open Drive Rejection</option>
+                        <option value="ppt">PPT — Pivot Pressure Trade</option>
+                        <option value="evening_star">Evening Star</option>
+                        <option value="morning_star">Morning Star</option>
+                        <option value="virgin_cpr">Virgin CPR Reversal</option>
+                        <option value="rcr">RCR — Red Candle Retracement</option>
+                        <option value="gcr">GCR — Green Candle Retracement</option>
+                        <option value="gap_up_rejection">Gap Up Rejection</option>
+                        <option value="gap_down_rejection">Gap Down Rejection</option>
+                        <option value="m_reversal">M Reversal</option>
+                        <option value="w_reversal">W Reversal</option>
+                        <option value="cprbo">CPRBO — CPR Breakout</option>
                         <option value="rcbo">RCBO — Red Candle Breakout</option>
+                        <option value="gcbo">GCBO — Green Candle Breakout</option>
                     </select>
-
                     <select id="backtestSymbol" style="background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px 10px;font-size:12px;">
                         <option value="nifty">NIFTY 50</option>
                         <option value="banknifty">BANK NIFTY</option>
@@ -1010,7 +1023,7 @@
                     </select>
                     <button class="journal-refresh-btn" onclick="runBacktest()">Run Backtest</button>
                 </div>
-                <div id="backtestStrategyHelp" style="font-size:12px;color:#94a3b8;margin:-4px 0 12px;">Existing Strategy: current production backtest logic. RCBO runs independently and does not modify it.</div>
+                <div id="backtestStrategyHelp" style="font-size:12px;color:#94a3b8;margin:-4px 0 12px;">Existing Strategy: current production backtest logic. The 15 PivotCall setups run through a separate endpoint and do not modify the existing strategy.</div>
 
                 <div class="journal-stats" id="backtestStats" style="grid-template-columns:repeat(8,minmax(0,1fr));">
                     <div class="journal-stat"><span>Days</span><strong id="btStatDays">--</strong></div>
@@ -1136,20 +1149,37 @@ function getHistorySyncUrl() {
     return `${base}/api/history/sync?symbol=all`;
 }
 
-function getBacktestUrl(symbol, days, strategy = 'existing') {
+function getBacktestUrl(symbol, days, strategy='existing') {
     const base = normalizeApiBase(API_BASE_URL);
-    const path = strategy === 'rcbo' ? '/api/backtest/rcbo' : '/api/backtest';
-    return `${base}${path}?symbol=${encodeURIComponent(symbol)}&days=${encodeURIComponent(days)}`;
+    if (strategy && strategy !== 'existing') {
+        return `${base}/api/backtest/setup?symbol=${encodeURIComponent(symbol)}&days=${encodeURIComponent(days)}&strategy=${encodeURIComponent(strategy)}`;
+    }
+    return `${base}/api/backtest?symbol=${encodeURIComponent(symbol)}&days=${encodeURIComponent(days)}`;
 }
 
-        function updateBacktestStrategyHelp() {
-            const strategy = document.getElementById('backtestStrategy')?.value || 'existing';
-            const help = document.getElementById('backtestStrategyHelp');
-            if (!help) return;
-            help.textContent = strategy === 'rcbo'
-                ? 'RCBO: first 5m candle must be red; enter on the first later close above its high; reject breakouts directly into CPR TC/PDH resistance; use entry-candle low or PDH for large entry candles; existing trailing/target tiers apply.'
-                : 'Existing Strategy: current production backtest logic. RCBO runs independently and does not modify it.';
-        }
+function updateBacktestStrategyHelp() {
+    const strategy = document.getElementById('backtestStrategy')?.value || 'existing';
+    const help = document.getElementById('backtestStrategyHelp');
+    const labels = {
+        existing:'Existing Strategy: current production backtest logic.',
+        od:'OD: first 5m candle closes above PDH or below PDL; entry on the first-candle close.',
+        odr:'ODR: gap-up bullish opening with overhead resistance; short when the first-candle low breaks.',
+        ppt:'PPT: first candle crosses the CPR from one side and closes on the other side.',
+        evening_star:'Evening Star: gap-up bearish opening; short when price closes below PDH.',
+        morning_star:'Morning Star: gap-down bullish opening; long when price closes above PDL.',
+        virgin_cpr:'Virgin CPR Reversal: confirmation candle at a recent prior virgin CPR.',
+        rcr:'RCR: retracement to the high of a big/average first red candle with bearish confirmation.',
+        gcr:'GCR: retracement to the low of a big/average first green candle with bullish confirmation.',
+        gap_up_rejection:'Gap Up Rejection: bearish gap-up candle with overhead pivot/resistance; target is the gap/2R.',
+        gap_down_rejection:'Gap Down Rejection: wait for the gap to fill, then trade the bullish breakout above PDL.',
+        m_reversal:'M Reversal: failed upside trend, trapped longs, then retest of the reversal high.',
+        w_reversal:'W Reversal: failed downside trend, trapped shorts, then retest of the reversal low.',
+        cprbo:'CPRBO: CPR consolidation followed by a bullish or bearish CPR breakout.',
+        rcbo:'RCBO: first red candle high breakout; CPR resistance is avoided; large entry candles may use PDH as structural stop.',
+        gcbo:'GCBO: first green candle low breakdown; CPR support is avoided; large entry candles may use structural pivot support.'
+    };
+    if (help) help.textContent = labels[strategy] || labels.existing;
+}
 
 function setConnection(connected, message) {
     const statusIndicator = document.getElementById('statusIndicator');
@@ -1186,6 +1216,7 @@ function setConnection(connected, message) {
         }
         setInterval(updateClock, 1000);
         updateClock();
+        updateBacktestStrategyHelp();
 
         // Change timeframe
         function changeTimeframe(tf) {
@@ -1499,7 +1530,7 @@ function setConnection(connected, message) {
                         <td>${safeString(t.symbolLabel || t.symbol, '--')}</td>
                         <td><span class="journal-signal-badge ${sig}">${safeUpper(t.signal)}</span></td>
                         <td>${t.entry ?? '--'}</td>
-                        <td>${t.stopLoss ?? '--'}${t.stopReason ? `<small style="display:block;color:#94a3b8;">${safeString(t.stopReason, '')}</small>` : ''}</td>
+                        <td>${t.stopLoss ?? '--'}</td>
                         <td>${t.target ?? '--'}</td>
                         <td>${(t.riskReward !== undefined && t.riskReward !== null) ? `1:${t.riskReward}` : '--'}</td>
                         <td><span class="journal-status-badge ${st.cls}">${st.label}</span></td>
@@ -1552,8 +1583,11 @@ function setConnection(connected, message) {
             if (note) note.textContent = '';
             try {
                 const res = await fetch(getBacktestUrl(symbol, days, strategy));
-                const data = await res.json();
-                if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                const raw = await res.text();
+                let data;
+                try { data = JSON.parse(raw); }
+                catch (_) { throw new Error(`HTTP ${res.status}: backend returned non-JSON (${raw.slice(0,120)})`); }
+                if (!res.ok) throw new Error(data.error || data.details || `HTTP ${res.status}`);
                 renderBacktestResults(data);
             } catch (e) {
                 console.warn('Backtest fetch failed:', e);
@@ -1598,12 +1632,6 @@ function setConnection(connected, message) {
                 if (data.dataSource === 'live_fallback_max_60d') bits.push('Using live data (max ~60 days available — sync to GitHub to build a longer archive).');
                 if (data.dataSource === 'unavailable') bits.push(data.note || 'No data available.');
                 if (data.historyRange) bits.push(`Data range analyzed: ${data.historyRange.from} → ${data.historyRange.to} (${data.daysAnalyzed} days).`);
-                if (data.strategy === 'RCBO' && data.filters) {
-                    bits.push(`RCBO filters: ${data.filters.rejectedFirstCandleNotRed ?? 0} non-red first candles, ${data.filters.rejectedDirectResistance ?? 0} resistance rejections, ${data.filters.rejectedInvalidStop ?? 0} invalid-stop rejections.`);
-                }
-                if (data.strategy === 'RCBO' && data.rcboRules) {
-                    bits.push(`SL: ${data.rcboRules.stopNormal}; large entry candle: ${data.rcboRules.stopLargeEntry}; trailing: existing configured tiers.`);
-                }
                 note.textContent = bits.join(' ');
             }
 
@@ -1623,7 +1651,7 @@ function setConnection(connected, message) {
                 const rr = (t.riskReward !== undefined && t.riskReward !== null) ? `${t.riskReward > 0 ? '+' : ''}${t.riskReward}R` : '--';
                 return `
                     <tr>
-                        <td><span class="journal-signal-badge ${data.strategy === 'RCBO' ? 'buy' : 'changed'}">${safeUpper(data.strategyLabel || data.strategy || 'Existing')}</span></td>
+                        <td>${safeString(t.strategyLabel || data.strategyLabel || data.strategy, '--')}</td>
                         <td>${safeString(t.date, '--')}</td>
                         <td><span class="journal-signal-badge ${globalCls}">${safeUpper(t.globalStatus)}</span></td>
                         <td><span class="journal-signal-badge ${sigCls}">${safeUpper(t.signal)}</span></td>
@@ -2123,7 +2151,6 @@ function setConnection(connected, message) {
             fetchMarketData();
             fetchSignalLog();
             fetchHistoryStatus();
-            updateBacktestStrategyHelp();
         });
         
         window.addEventListener('resize', () => {
