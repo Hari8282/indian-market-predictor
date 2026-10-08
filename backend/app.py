@@ -774,208 +774,6 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         }
     }
 
-# ---------------------------------------------------------------------------
-# RCBO (Red Candle Breakout) backtest -- isolated from the existing strategy
-# ---------------------------------------------------------------------------
-RCBO_CPR_BUFFER_PCT = 0.15
-RCBO_PDH_BUFFER_PCT = 0.15
-RCBO_MAX_ENTRY_CANDLE_MULTIPLIER = 1.50
-
-
-def _rcbo_resistance_blocks_entry(first_high, entry, tc, pdh):
-    """Reject a long RCBO when the breakout closes directly into major resistance."""
-    levels = []
-    for name, level in (("CPR TC", tc), ("PDH", pdh)):
-        if level is None or not np.isfinite(level):
-            continue
-        level = float(level)
-        # Resistance is relevant only when it sits at/above the first-candle high.
-        if level < first_high:
-            continue
-        buffer_pct = RCBO_CPR_BUFFER_PCT if name == "CPR TC" else RCBO_PDH_BUFFER_PCT
-        buffer = max(abs(level) * buffer_pct / 100.0, 0.01)
-        if entry <= level + buffer:
-            levels.append({"name": name, "level": round(level, 2)})
-    return levels
-
-
-def run_rcbo_backtest(symbol, days=100, min_rr=2.0, stop_buffer=STOP_LOSS_BUFFER_PCT,
-                      trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
-    """Backtest the independent 5-minute Red Candle Breakout (RCBO) strategy.
-
-    Rules:
-      1. First 5m candle must be bearish (Close < Open).
-      2. Long entry on the first subsequent candle that closes above first-candle high.
-      3. Reject breakout if it closes directly into CPR TC or PDH resistance.
-      4. SL = entry-candle low; if the entry candle is unusually large (>1.5x first
-         candle range), use PDH when PDH is a valid level below entry.
-      5. Target and trailing use the same simulator/tier configuration as the
-         existing backtest. The existing /api/backtest strategy is untouched.
-    """
-    if trail_tiers is None:
-        trail_tiers = TRAIL_TIERS
-
-    intraday = load_5m_history(symbol)
-    data_source = 'github_archive'
-    if intraday is None or len(intraday) == 0:
-        intraday = fetch_5m_history_chunked(symbol, days=60)
-        data_source = 'live_fallback_max_60d'
-    if intraday is None or len(intraday) == 0:
-        return {
-            "strategy": "RCBO",
-            "symbol": symbol,
-            "symbolLabel": SYMBOL_LABELS.get(symbol, symbol),
-            "trades": [], "stats": _backtest_stats([]),
-            "daysAnalyzed": 0, "setupsIdentified": 0,
-            "dataSource": "unavailable",
-            "note": "No 5m history available yet."
-        }
-
-    cutoff = now_ist() - timedelta(days=days)
-    intraday = intraday[intraday.index >= cutoff]
-    if len(intraday) == 0:
-        return {
-            "strategy": "RCBO", "symbol": symbol,
-            "symbolLabel": SYMBOL_LABELS.get(symbol, symbol),
-            "trades": [], "stats": _backtest_stats([]),
-            "daysAnalyzed": 0, "setupsIdentified": 0,
-            "dataSource": data_source,
-            "note": "No candles fall within the requested day range."
-        }
-
-    daily_ohlc = _daily_ohlc_from_5m(intraday)
-    trades = []
-    setups_identified = 0
-    rejected_resistance = 0
-    rejected_flat_or_green = 0
-    rejected_invalid_stop = 0
-    trading_dates = sorted(set(intraday.index.date))
-
-    for i, d in enumerate(trading_dates):
-        if i == 0:
-            continue
-        prev_date = trading_dates[i - 1]
-        if prev_date not in daily_ohlc.index:
-            continue
-
-        prev = daily_ohlc.loc[prev_date]
-        pdh = float(prev['High'])
-        pivot = (float(prev['High']) + float(prev['Low']) + float(prev['Close'])) / 3.0
-        bc = (float(prev['High']) + float(prev['Low'])) / 2.0
-        tc = (pivot - bc) + pivot
-
-        day_candles = intraday[intraday.index.date == d]
-        if len(day_candles) < 2:
-            continue
-
-        first = day_candles.iloc[0]
-        first_open = float(first['Open'])
-        first_high = float(first['High'])
-        first_low = float(first['Low'])
-        first_close = float(first['Close'])
-        first_range = first_high - first_low
-
-        if first_close >= first_open or first_range <= 0:
-            rejected_flat_or_green += 1
-            continue
-
-        setups_identified += 1
-        rest = day_candles.iloc[1:]
-        breakout = rest[rest['Close'] > first_high]
-        if len(breakout) == 0:
-            continue
-
-        entry_row = breakout.iloc[0]
-        entry_time = breakout.index[0]
-        entry = float(entry_row['Close'])
-
-        blocked_levels = _rcbo_resistance_blocks_entry(first_high, entry, tc, pdh)
-        if blocked_levels:
-            rejected_resistance += 1
-            continue
-
-        entry_range = float(entry_row['High']) - float(entry_row['Low'])
-        entry_candle_too_large = entry_range > (first_range * RCBO_MAX_ENTRY_CANDLE_MULTIPLIER)
-
-        entry_low_stop = float(entry_row['Low'])
-        low_buffer = entry_low_stop * (stop_buffer / 100.0)
-        stop_from_entry_candle = entry_low_stop - low_buffer
-
-        # User-requested PDH fallback for an unusually large entry candle.
-        # PDH must be below entry to be a valid long stop; otherwise use entry low.
-        if entry_candle_too_large and pdh < entry:
-            stop = pdh
-            stop_reason = 'PDH (large entry candle)'
-        else:
-            stop = stop_from_entry_candle
-            stop_reason = 'Entry candle low'
-            if entry_candle_too_large and pdh >= entry:
-                stop_reason += '; PDH invalid below entry'
-
-        if stop is None or stop >= entry:
-            rejected_invalid_stop += 1
-            continue
-
-        risk = entry - stop
-        if risk <= 0:
-            rejected_invalid_stop += 1
-            continue
-
-        target = round(entry + risk * min_rr, 2)
-        trade = _simulate_trade(
-            day_candles, entry_time, 'BUY', entry, stop, target, risk, d,
-            'neutral', 'red', trail_tiers, extended_target_r
-        )
-        trade.update({
-            'strategy': 'RCBO',
-            'triggerHigh': round(first_high, 2),
-            'firstCandleOpen': round(first_open, 2),
-            'firstCandleClose': round(first_close, 2),
-            'firstCandleRange': round(first_range, 2),
-            'entryCandleRange': round(entry_range, 2),
-            'entryCandleTooLarge': bool(entry_candle_too_large),
-            'stopReason': stop_reason,
-            'pdh': round(pdh, 2),
-            'cprPivot': round(pivot, 2),
-            'cprTC': round(tc, 2),
-            'cprBC': round(bc, 2),
-            'resistanceFilter': 'PASS'
-        })
-        trades.append(trade)
-
-    return {
-        "strategy": "RCBO",
-        "strategyLabel": "Red Candle Breakout",
-        "symbol": symbol,
-        "symbolLabel": SYMBOL_LABELS.get(symbol, symbol),
-        "trades": trades,
-        "stats": _backtest_stats(trades),
-        "daysAnalyzed": max(0, len(trading_dates) - 1),
-        "setupsIdentified": setups_identified,
-        "dataSource": data_source,
-        "rcboRules": {
-            "timeframe": "5m",
-            "firstCandle": "bearish (Close < Open)",
-            "entry": "first subsequent close > first candle high",
-            "cprResistanceFilterPct": RCBO_CPR_BUFFER_PCT,
-            "pdhResistanceFilterPct": RCBO_PDH_BUFFER_PCT,
-            "largeEntryCandleMultiplier": RCBO_MAX_ENTRY_CANDLE_MULTIPLIER,
-            "stopNormal": "entry candle low minus configured buffer",
-            "stopLargeEntry": "PDH when PDH < entry, otherwise entry candle low",
-            "targetR": min_rr
-        },
-        "filters": {
-            "rejectedFirstCandleNotRed": rejected_flat_or_green,
-            "rejectedDirectResistance": rejected_resistance,
-            "rejectedInvalidStop": rejected_invalid_stop
-        },
-        "trailing": {"tiers": trail_tiers, "extendedTargetR": extended_target_r},
-        "historyRange": {
-            "from": intraday.index[0].strftime('%Y-%m-%d'),
-            "to": intraday.index[-1].strftime('%Y-%m-%d')
-        }
-    }
-
 def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, trade_date,
                      global_status, first_candle_label,
                      trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
@@ -2015,6 +1813,481 @@ def get_signal_log():
         logger.exception("Signal log handler exception")
         return jsonify({'error': 'Failed to load signal log', 'details': str(e)}), 500
 
+
+
+# ---------------------------------------------------------------------------
+# PivotCall 15-pattern strategy backtesting engine
+# Source: "Day Trading with Pivot Points & Price Action" eBook.
+# This is isolated from the existing /api/backtest implementation.
+# ---------------------------------------------------------------------------
+PIVOTCALL_STRATEGIES = {
+    'od': 'OD — Open Drive',
+    'odr': 'ODR — Open Drive Rejection',
+    'ppt': 'PPT — Pivot Pressure Trade',
+    'evening_star': 'Evening Star',
+    'morning_star': 'Morning Star',
+    'virgin_cpr': 'Virgin CPR Reversal',
+    'rcr': 'RCR — Red Candle Retracement',
+    'gcr': 'GCR — Green Candle Retracement',
+    'gap_up_rejection': 'Gap Up Rejection',
+    'gap_down_rejection': 'Gap Down Rejection',
+    'm_reversal': 'M Reversal',
+    'w_reversal': 'W Reversal',
+    'cprbo': 'CPRBO — CPR Breakout',
+    'rcbo': 'RCBO — Red Candle Breakout',
+    'gcbo': 'GCBO — Green Candle Breakout',
+}
+
+# Deterministic backtest interpretations of subjective chart-reading terms.
+# These thresholds make the eBook setups testable on OHLC data without changing
+# the existing production strategy.
+PC_APPROACH_PCT = 0.0015
+PC_GAP_MIN_PCT = 0.10
+PC_SIZE_LOOKBACK = 20
+PC_BIG_CANDLE_MULTIPLIER = 1.00
+PC_M_RETRACE_MIN = 0.80
+PC_M_RETRACE_MAX = 1.05
+PC_CPR_WIDTH_MIN_PCT = 0.05
+PC_CPR_WIDTH_MAX_PCT = 0.50
+PC_CPR_NEAR_PCT = 0.20
+PC_RR = 2.0
+
+
+def _pc_float(v):
+    try:
+        v = float(v)
+        return v if np.isfinite(v) else None
+    except Exception:
+        return None
+
+
+def _pc_levels(prev):
+    h, l, c = map(float, (prev['High'], prev['Low'], prev['Close']))
+    pp = (h + l + c) / 3.0
+    bc = (h + l) / 2.0
+    tc = (pp - bc) + pp
+    r1 = 2 * pp - l
+    s1 = 2 * pp - h
+    r2 = pp + (h - l)
+    s2 = pp - (h - l)
+    return {'PP': pp, 'BC': bc, 'TC': tc, 'R1': r1, 'S1': s1, 'R2': r2, 'S2': s2,
+            'CPR_LOW': min(bc, tc), 'CPR_HIGH': max(bc, tc)}
+
+
+def _pc_candle(row):
+    o, h, l, c = map(float, (row['Open'], row['High'], row['Low'], row['Close']))
+    r = max(h - l, 0.0)
+    body = abs(c - o)
+    upper = h - max(o, c)
+    lower = min(o, c) - l
+    return {'open': o, 'high': h, 'low': l, 'close': c, 'range': r,
+            'body': body, 'upper': max(upper, 0.0), 'lower': max(lower, 0.0)}
+
+
+def _pc_bullish(row):
+    return float(row['Close']) > float(row['Open'])
+
+
+def _pc_bearish(row):
+    return float(row['Close']) < float(row['Open'])
+
+
+def _pc_bull_pin(row):
+    x = _pc_candle(row)
+    return x['range'] > 0 and x['lower'] >= x['body'] * 1.2 and x['lower'] >= x['range'] * 0.45 and x['close'] >= x['low'] + x['range'] * 0.55
+
+
+def _pc_bear_pin(row):
+    x = _pc_candle(row)
+    return x['range'] > 0 and x['upper'] >= x['body'] * 1.2 and x['upper'] >= x['range'] * 0.45 and x['close'] <= x['low'] + x['range'] * 0.45
+
+
+def _pc_marubozu(row):
+    x = _pc_candle(row)
+    return x['range'] > 0 and x['body'] / x['range'] >= 0.70
+
+
+def _pc_near(price, level, pct=PC_APPROACH_PCT):
+    if price is None or level is None or not np.isfinite(level):
+        return False
+    return abs(float(price) - float(level)) <= abs(float(level)) * pct
+
+
+def _pc_target(signal, entry, risk, levels, preferred=None):
+    if risk <= 0:
+        return None
+    candidates = []
+    if preferred is not None:
+        candidates.append(preferred)
+    if signal == 'BUY':
+        candidates += [levels.get('R1'), levels.get('R2'), levels.get('PDH'), levels.get('TC')]
+        valid = sorted(v for v in candidates if v is not None and v > entry)
+        for v in valid:
+            if (v - entry) / risk >= PC_RR:
+                return round(v, 2)
+        return round(entry + risk * PC_RR, 2)
+    candidates += [levels.get('S1'), levels.get('S2'), levels.get('PDL'), levels.get('BC')]
+    valid = sorted((v for v in candidates if v is not None and v < entry), reverse=True)
+    for v in valid:
+        if (entry - v) / risk >= PC_RR:
+            return round(v, 2)
+    return round(entry - risk * PC_RR, 2)
+
+
+def _pc_stop(signal, entry, row, levels, preferred=None, buffer_pct=STOP_LOSS_BUFFER_PCT):
+    c = _pc_candle(row)
+    if signal == 'BUY':
+        candidates = [c['low'] * (1 - buffer_pct / 100.0)]
+        if preferred is not None:
+            candidates.append(float(preferred))
+        candidates += [levels.get('BC'), levels.get('PDL'), levels.get('S1')]
+        valid = [v for v in candidates if v is not None and v < entry]
+        return max(valid) if valid else None
+    candidates = [c['high'] * (1 + buffer_pct / 100.0)]
+    if preferred is not None:
+        candidates.append(float(preferred))
+    candidates += [levels.get('TC'), levels.get('PDH'), levels.get('R1')]
+    valid = [v for v in candidates if v is not None and v > entry]
+    return min(valid) if valid else None
+
+
+def _pc_gap(prev, first):
+    po, fo = float(prev['Close']), float(first['Open'])
+    ph, pl = float(prev['High']), float(prev['Low'])
+    return {
+        'gapUp': float(first['Open']) > ph,
+        'gapDown': float(first['Open']) < pl,
+        'gapUpPct': ((fo - ph) / ph * 100.0) if ph else 0.0,
+        'gapDownPct': ((pl - fo) / pl * 100.0) if pl else 0.0,
+        'open': fo, 'prevClose': po
+    }
+
+
+def _pc_is_big_first(first, prior_open_ranges):
+    r = _pc_candle(first)['range']
+    if r <= 0:
+        return False
+    if len(prior_open_ranges) < 3:
+        return True
+    med = float(np.median(prior_open_ranges[-PC_SIZE_LOOKBACK:]))
+    return r >= med * PC_BIG_CANDLE_MULTIPLIER
+
+
+def _pc_virgin_cpr_map(intraday, daily_ohlc):
+    """Return prior-session CPR levels that remained virgin on their own day."""
+    result = {}
+    dates = sorted(set(intraday.index.date))
+    for d in dates:
+        day = intraday[intraday.index.date == d]
+        if d not in daily_ohlc.index or len(day) == 0:
+            continue
+        lv = _pc_levels(daily_ohlc.loc[d])
+        low, high = lv['CPR_LOW'], lv['CPR_HIGH']
+        touched_by_body = False
+        for _, r in day.iterrows():
+            o, c = float(r['Open']), float(r['Close'])
+            if min(o, c) <= high and max(o, c) >= low:
+                # A body entering CPR invalidates virgin CPR; isolated wicks do not.
+                if min(o, c) >= low and max(o, c) <= high:
+                    touched_by_body = True
+                    break
+        if not touched_by_body:
+            result[d] = lv
+    return result
+
+
+def _pc_make_trade(day_candles, entry_time, signal, entry, stop, target, risk, d,
+                   global_status, strategy_key, reason, trail_tiers, extended_target_r, meta=None):
+    if entry is None or stop is None or target is None or risk <= 0:
+        return None
+    trade = _simulate_trade(day_candles, entry_time, signal, float(entry), float(stop), float(target),
+                            float(risk), d, global_status, 'strategy', trail_tiers, extended_target_r)
+    trade['strategy'] = strategy_key
+    trade['strategyLabel'] = PIVOTCALL_STRATEGIES.get(strategy_key, strategy_key)
+    trade['reason'] = reason
+    if meta:
+        trade.update(meta)
+    return trade
+
+
+def _pc_find_setup(strategy, day, rest, first, levels, prev, prior_open_ranges, virgin_map):
+    """Return (signal, entry_row, stop_preference, target_preference, reason, meta) or None."""
+    f = _pc_candle(first)
+    gap = _pc_gap(prev, first)
+    ph, pl = levels['PDH'], levels['PDL']
+    cpr_low, cpr_high = levels['CPR_LOW'], levels['CPR_HIGH']
+    tc, bc = levels['TC'], levels['BC']
+    first_green, first_red = f['close'] > f['open'], f['close'] < f['open']
+    big = _pc_is_big_first(first, prior_open_ranges)
+    idx = list(rest.index)
+
+    def result(sig, pos, stop_pref=None, target_pref=None, reason='', meta=None):
+        if pos is None or pos < 0 or pos >= len(rest):
+            return None
+        row = rest.iloc[pos]
+        return sig, row, stop_pref, target_pref, reason, (meta or {})
+
+    # 1) OD — first 5m candle closes outside previous-day range.
+    if strategy == 'od':
+        if first_green and f['close'] > ph:
+            return ('BUY', first, ph, None, 'OD: first 5m candle closed above PDH', {'triggerLevel':'PDH'})
+        if first_red and f['close'] < pl:
+            return ('SELL', first, pl, None, 'OD: first 5m candle closed below PDL', {'triggerLevel':'PDL'})
+
+    # 2) ODR — gap-up bullish opening rejected, then first-candle low breaks.
+    if strategy == 'odr' and gap['gapUp'] and first_green:
+        resistance = [v for v in (tc, levels['R1'], levels['R2']) if v is not None and v >= f['close']]
+        if resistance:
+            for p, row in enumerate(rest.itertuples()):
+                rr = row._asdict() if hasattr(row, '_asdict') else {}
+                low = float(getattr(row, 'Low'))
+                close = float(getattr(row, 'Close'))
+                if close < f['low']:
+                    return result('SELL', p, min(resistance), levels['CPR_LOW'],
+                                  'ODR: gap-up bullish candle rejected and first-candle low broke', {'resistance':min(resistance)})
+
+    # 3) PPT — first candle engulfs CPR from one side and closes on the other side.
+    if strategy == 'ppt':
+        if f['open'] <= cpr_low and f['close'] > cpr_high and first_green:
+            return ('BUY', first, cpr_low, ph, 'PPT: first bullish candle crossed the full CPR', {'cprSide':'bullish'})
+        if f['open'] >= cpr_high and f['close'] < cpr_low and first_red:
+            return ('SELL', first, cpr_high, pl, 'PPT: first bearish candle crossed the full CPR', {'cprSide':'bearish'})
+
+    # 4) Evening Star — gap-up bearish opening, entry when close falls below PDH.
+    if strategy == 'evening_star' and gap['gapUp'] and (first_red or f['body'] / f['range'] < 0.15 if f['range'] else False):
+        for p, (_, row) in enumerate(rest.iterrows()):
+            if float(row['Close']) < ph:
+                return result('SELL', p, levels['R1'], cpr_low, 'Evening Star: gap-up rejection closed below PDH', {'gapPct':gap['gapUpPct']})
+
+    # 5) Morning Star — gap-down bullish opening, entry when close rises above PDL.
+    if strategy == 'morning_star' and gap['gapDown'] and (first_green or f['body'] / f['range'] < 0.15 if f['range'] else False):
+        for p, (_, row) in enumerate(rest.iterrows()):
+            if float(row['Close']) > pl:
+                return result('BUY', p, pl, cpr_high, 'Morning Star: gap-down reversal closed above PDL', {'gapPct':gap['gapDownPct']})
+
+    # 6) Virgin CPR reversal — use the most recent qualifying virgin CPR from 5 sessions.
+    if strategy == 'virgin_cpr':
+        prior_dates = sorted([x for x in virgin_map.keys() if x < day.index[0].date()], reverse=True)[:5]
+        for vd in prior_dates:
+            vl = virgin_map[vd]
+            vlow, vhigh = vl['CPR_LOW'], vl['CPR_HIGH']
+            for p, (_, row) in enumerate(rest.iterrows()):
+                hi, lo = float(row['High']), float(row['Low'])
+                if hi >= vlow and lo <= vhigh:
+                    if _pc_bull_pin(row) or (_pc_bullish(row) and float(row['Close']) > vhigh):
+                        return result('BUY', p, vl['PP'], cpr_high, 'Virgin CPR reversal: bullish confirmation at prior virgin CPR', {'virginDate':str(vd)})
+                    if _pc_bear_pin(row) or (_pc_bearish(row) and float(row['Close']) < vlow):
+                        return result('SELL', p, vl['PP'], cpr_low, 'Virgin CPR reversal: bearish confirmation at prior virgin CPR', {'virginDate':str(vd)})
+
+    # 7) RCR — big/average first red candle, retrace to its high and bearish confirmation.
+    if strategy == 'rcr' and first_red and big:
+        for p, (_, row) in enumerate(rest.iterrows()):
+            near_high = float(row['High']) >= f['high'] * (1 - PC_APPROACH_PCT)
+            if near_high and (_pc_bearish(row) or _pc_bear_pin(row)):
+                pref = tc if _pc_near(f['high'], tc, PC_CPR_NEAR_PCT / 100.0) else None
+                return result('SELL', p, pref, levels['S1'], 'RCR: first red candle high retracement with bearish confirmation', {'firstRange':f['range']})
+
+    # 8) GCR — big/average first green candle, retrace to its low and bullish confirmation.
+    if strategy == 'gcr' and first_green and big:
+        for p, (_, row) in enumerate(rest.iterrows()):
+            near_low = float(row['Low']) <= f['low'] * (1 + PC_APPROACH_PCT)
+            if near_low and (_pc_bullish(row) or _pc_bull_pin(row)):
+                pref = bc if _pc_near(f['low'], bc, PC_CPR_NEAR_PCT / 100.0) else pl
+                return result('BUY', p, pref, levels['R1'], 'GCR: first green candle low retracement with bullish confirmation', {'firstRange':f['range']})
+
+    # 9) Gap Up Rejection — short the first bearish gap-up candle when resistance is above.
+    if strategy == 'gap_up_rejection' and gap['gapUp'] and first_red:
+        resistance = [v for v in (tc, levels['R1'], levels['R2']) if v is not None and v > f['high']]
+        if resistance:
+            return ('SELL', first, min(resistance), ph, 'Gap Up Rejection: bearish gap-up candle with overhead resistance', {'resistance':min(resistance), 'gapPct':gap['gapUpPct']})
+
+    # 10) Gap Down Rejection — wait for gap fill, then bullish breakout above the gap boundary.
+    if strategy == 'gap_down_rejection' and gap['gapDown']:
+        filled = False
+        for p, (_, row) in enumerate(rest.iterrows()):
+            hi, close = float(row['High']), float(row['Close'])
+            if not filled and hi >= pl:
+                filled = True
+                continue
+            if filled and close > pl and (_pc_bullish(row) or _pc_marubozu(row)):
+                return result('BUY', p, _pc_candle(row)['low'], levels['TC'], 'Gap Down Rejection: gap filled and bullish breakout above PDL', {'gapPct':gap['gapDownPct']})
+
+    # 11) M reversal — up move, reversal, near-day-low retrace, then retest of reversal high.
+    if strategy == 'm_reversal' and len(day) >= 8:
+        highs = day['High'].astype(float).to_numpy()
+        lows = day['Low'].astype(float).to_numpy()
+        closes = day['Close'].astype(float).to_numpy()
+        # Search for a prominent early high, later low, then retest of that high.
+        for j in range(2, len(day)-3):
+            h0 = highs[j]
+            if h0 <= max(highs[:j+1]) * 0.995:
+                continue
+            low_after = lows[j+1:]
+            if len(low_after) == 0 or float(np.min(low_after)) > h0 - (h0 - lows[:j+1].min()) * 0.80:
+                continue
+            for k in range(j+2, len(day)):
+                if float(highs[k]) >= h0 * PC_M_RETRACE_MIN and float(closes[k]) < h0:
+                    # only enter after the low/reversal phase
+                    if k > j+1 and float(lows[k]) > float(np.min(lows[j+1:k])) * 0.99:
+                        row = day.iloc[k]
+                        return ('SELL', row, h0, levels['S1'], 'M reversal: trapped longs retested reversal high', {'reversalHigh':round(h0,2)})
+
+    # 12) W reversal — mirror image of M.
+    if strategy == 'w_reversal' and len(day) >= 8:
+        highs = day['High'].astype(float).to_numpy()
+        lows = day['Low'].astype(float).to_numpy()
+        closes = day['Close'].astype(float).to_numpy()
+        for j in range(2, len(day)-3):
+            l0 = lows[j]
+            if l0 >= min(lows[:j+1]) * 1.005:
+                continue
+            for k in range(j+2, len(day)):
+                if float(lows[k]) <= l0 * (1.0 / PC_M_RETRACE_MIN) and float(closes[k]) > l0:
+                    if float(highs[k]) < float(np.max(highs[j+1:k])) * 1.01:
+                        row = day.iloc[k]
+                        return ('BUY', row, l0, levels['R1'], 'W reversal: trapped shorts retested reversal low', {'reversalLow':round(l0,2)})
+
+    # 13) CPRBO — breakout after price has spent time inside/at CPR; avoid immediate resistance.
+    if strategy == 'cprbo' and len(rest) >= 2:
+        inside_count = 0
+        for p, (_, row) in enumerate(rest.iterrows()):
+            hi, lo, close = float(row['High']), float(row['Low']), float(row['Close'])
+            if lo <= cpr_high and hi >= cpr_low:
+                inside_count += 1
+            if inside_count >= 2 and close > cpr_high:
+                return result('BUY', p, cpr_low, levels['R1'], 'CPRBO: bullish breakout after CPR consolidation', {'cprWidthPct':abs(tc-bc)/levels['PP']*100 if levels['PP'] else 0})
+            if inside_count >= 2 and close < cpr_low:
+                return result('SELL', p, cpr_high, levels['S1'], 'CPRBO: bearish breakout after CPR consolidation', {'cprWidthPct':abs(tc-bc)/levels['PP']*100 if levels['PP'] else 0})
+
+    # 14) RCBO — first red candle high breakout; avoid breakout directly into CPR.
+    if strategy == 'rcbo' and first_red and f['range'] > 0:
+        for p, (_, row) in enumerate(rest.iterrows()):
+            close = float(row['Close'])
+            if close > f['high']:
+                if close <= cpr_high * (1 + PC_CPR_NEAR_PCT / 100.0) and cpr_high >= f['high']:
+                    continue
+                entry_candle = _pc_candle(row)
+                stop_pref = levels['PDH'] if entry_candle['range'] > f['range'] * 1.50 and levels['PDH'] < close else entry_candle['low']
+                return result('BUY', p, stop_pref, levels['R1'], 'RCBO: first red candle high breakout', {'triggerHigh':round(f['high'],2), 'entryCandleTooLarge':entry_candle['range'] > f['range']*1.50})
+
+    # 15) GCBO — first green candle low breakdown; mirror of RCBO.
+    if strategy == 'gcbo' and first_green and f['range'] > 0:
+        for p, (_, row) in enumerate(rest.iterrows()):
+            close = float(row['Close'])
+            if close < f['low']:
+                if close >= cpr_low * (1 - PC_CPR_NEAR_PCT / 100.0) and cpr_low <= f['low']:
+                    continue
+                entry_candle = _pc_candle(row)
+                stop_pref = levels['PDH'] if entry_candle['range'] > f['range'] * 1.50 and levels['PDH'] > close else entry_candle['high']
+                return result('SELL', p, stop_pref, levels['S1'], 'GCBO: first green candle low breakdown', {'triggerLow':round(f['low'],2), 'entryCandleTooLarge':entry_candle['range'] > f['range']*1.50})
+
+    return None
+
+
+def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUFFER_PCT,
+                           trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
+    if strategy not in PIVOTCALL_STRATEGIES:
+        raise ValueError(f'Unknown strategy: {strategy}')
+    if trail_tiers is None:
+        trail_tiers = TRAIL_TIERS
+
+    intraday = load_5m_history(symbol)
+    data_source = 'github_archive'
+    if intraday is None or len(intraday) == 0:
+        intraday = fetch_5m_history_chunked(symbol, days=60)
+        data_source = 'live_fallback_max_60d'
+    if intraday is None or len(intraday) == 0:
+        return {'strategy':strategy,'strategyLabel':PIVOTCALL_STRATEGIES[strategy],'symbol':symbol,'trades':[],
+                'stats':_backtest_stats([]),'daysAnalyzed':0,'setupsIdentified':0,'dataSource':'unavailable',
+                'note':'No 5m history available yet. Sync 5m history to GitHub first.'}
+
+    cutoff = now_ist() - timedelta(days=days)
+    intraday = intraday[intraday.index >= cutoff]
+    if len(intraday) == 0:
+        return {'strategy':strategy,'strategyLabel':PIVOTCALL_STRATEGIES[strategy],'symbol':symbol,'trades':[],
+                'stats':_backtest_stats([]),'daysAnalyzed':0,'setupsIdentified':0,'dataSource':data_source,
+                'note':'No candles fall within the requested day range.'}
+
+    daily_ohlc = _daily_ohlc_from_5m(intraday)
+    virgin_map = _pc_virgin_cpr_map(intraday, daily_ohlc)
+    trading_dates = sorted(set(intraday.index.date))
+    trades, setups = [], 0
+    prior_open_ranges = []
+
+    # Global status is displayed as context only; the eBook setups themselves do not
+    # require the app's global-index filter. This prevents an unrelated filter from
+    # silently changing the source strategy.
+    global_daily, g_expected, g_failed = fetch_global_daily_history_checked()
+    g_data_ok = len(global_daily) >= MIN_GLOBAL_SYMBOLS
+    with _GLOBAL_STORE_LOCK:
+        global_store, global_store_sha = load_global_status_store()
+    store_dirty = False
+
+    for i, d in enumerate(trading_dates):
+        if i == 0 or trading_dates[i-1] not in daily_ohlc.index:
+            continue
+        prev_date = trading_dates[i-1]
+        prev = daily_ohlc.loc[prev_date]
+        lv = _pc_levels(prev)
+        lv['PDH'] = float(prev['High']); lv['PDL'] = float(prev['Low'])
+        day = intraday[intraday.index.date == d]
+        if len(day) < 2:
+            continue
+        first = day.iloc[0]
+        rest = day.iloc[1:]
+        status, source, changed = resolve_global_status(global_daily, g_data_ok, d, global_store)
+        store_dirty = store_dirty or changed
+
+        setup = _pc_find_setup(strategy, day, rest, first, lv, prev, prior_open_ranges, virgin_map)
+        if setup:
+            setups += 1
+            signal, entry_row, stop_pref, target_pref, reason, meta = setup
+            entry_time = entry_row.name
+            entry = float(entry_row['Close'])
+            stop = _pc_stop(signal, entry, entry_row, lv, stop_pref, stop_buffer)
+            risk = (entry - stop) if signal == 'BUY' and stop is not None else ((stop - entry) if stop is not None else -1)
+            if risk > 0:
+                target = _pc_target(signal, entry, risk, lv, target_pref)
+                if target is not None:
+                    # Never accept a target that is on the wrong side of entry.
+                    valid_target = target > entry if signal == 'BUY' else target < entry
+                    if valid_target:
+                        trade = _pc_make_trade(day, entry_time, signal, entry, stop, target, risk, d,
+                                               status, strategy, reason, trail_tiers, extended_target_r, meta)
+                        if trade:
+                            trade['globalSource'] = source
+                            trades.append(trade)
+
+        prior_open_ranges.append(_pc_candle(first)['range'])
+
+    if store_dirty:
+        with _GLOBAL_STORE_LOCK:
+            save_global_status_store(global_store, global_store_sha)
+
+    return {
+        'strategy': strategy,
+        'strategyLabel': PIVOTCALL_STRATEGIES[strategy],
+        'symbol': symbol,
+        'symbolLabel': SYMBOL_LABELS.get(symbol, symbol),
+        'globalData': {'indicesExpected':g_expected,'indicesLoaded':len(global_daily),'indicesFailed':g_failed,
+                       'minRequired':MIN_GLOBAL_SYMBOLS,'ok':g_data_ok},
+        'trades': trades,
+        'stats': _backtest_stats(trades),
+        'daysAnalyzed': max(0, len(trading_dates)-1),
+        'setupsIdentified': setups,
+        'dataSource': data_source,
+        'stopLossBufferPct': stop_buffer,
+        'trailing': {'tiers': trail_tiers, 'extendedTargetR': extended_target_r},
+        'rules': {
+            'source': 'PivotCall eBook — 15 Day Trading Patterns & Strategies',
+            'timeframe': '5m', 'oneTradePerDayPerStrategy': True,
+            'target': 'next suitable pivot/support/resistance when >= 2R, otherwise 2R',
+            'subjectiveTerms': 'Big/average candle, near level, pin bar and consolidation are converted to deterministic OHLC thresholds.'
+        },
+        'historyRange': {'from': intraday.index[0].strftime('%Y-%m-%d'), 'to': intraday.index[-1].strftime('%Y-%m-%d')}
+    }
+
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'healthy'})
@@ -2061,6 +2334,35 @@ def history_status():
         })
     return jsonify({'symbols': results, 'retentionDays': HISTORY_RETENTION_DAYS, 'timestamp': now_ist().isoformat()})
 
+
+
+@app.route('/api/backtest/strategies', methods=['GET'])
+def backtest_strategy_catalog():
+    return jsonify({
+        'strategies': [{'key':k, 'label':v} for k,v in PIVOTCALL_STRATEGIES.items()],
+        'timeframe': '5m',
+        'source': 'PivotCall eBook — 15 Day Trading Patterns & Strategies'
+    })
+
+@app.route('/api/backtest/setup', methods=['GET'])
+def get_pivotcall_backtest():
+    try:
+        symbol = _resolve_symbols_param(request.args.get('symbol', 'nifty'))[0]
+        strategy = str(request.args.get('strategy', 'od')).strip().lower()
+        try:
+            days = max(1, min(HISTORY_RETENTION_DAYS, int(request.args.get('days', HISTORY_RETENTION_DAYS))))
+        except (TypeError, ValueError):
+            days = HISTORY_RETENTION_DAYS
+        result = run_pivotcall_backtest(symbol, strategy, days=days,
+                                        stop_buffer=STOP_LOSS_BUFFER_PCT,
+                                        trail_tiers=TRAIL_TIERS,
+                                        extended_target_r=EXTENDED_TARGET_R)
+        result['timestamp'] = now_ist().isoformat()
+        return jsonify(result)
+    except Exception as e:
+        logger.exception("PivotCall setup backtest handler exception")
+        return jsonify({'error':'Setup backtest failed','details':str(e)}), 500
+
 @app.route('/api/backtest', methods=['GET'])
 def get_backtest():
     try:
@@ -2077,29 +2379,6 @@ def get_backtest():
     except Exception as e:
         logger.exception("Backtest handler exception")
         return jsonify({'error': 'Backtest failed', 'details': str(e)}), 500
-
-@app.route('/api/backtest/rcbo', methods=['GET'])
-def get_rcbo_backtest():
-    """Independent RCBO backtest endpoint; does not alter /api/backtest."""
-    try:
-        symbol = _resolve_symbols_param(request.args.get('symbol', 'nifty'))[0]
-        try:
-            days = max(1, min(HISTORY_RETENTION_DAYS, int(request.args.get('days', HISTORY_RETENTION_DAYS))))
-        except (TypeError, ValueError):
-            days = HISTORY_RETENTION_DAYS
-
-        result = run_rcbo_backtest(
-            symbol,
-            days=days,
-            stop_buffer=STOP_LOSS_BUFFER_PCT,
-            trail_tiers=TRAIL_TIERS,
-            extended_target_r=EXTENDED_TARGET_R
-        )
-        result['timestamp'] = now_ist().isoformat()
-        return jsonify(result)
-    except Exception as e:
-        logger.exception("RCBO backtest handler exception")
-        return jsonify({'error': 'RCBO backtest failed', 'details': str(e)}), 500
 
 @app.route('/api/global-status', methods=['GET', 'POST'])
 def global_status_store_endpoint():
