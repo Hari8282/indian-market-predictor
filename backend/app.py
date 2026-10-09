@@ -776,11 +776,17 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
 
 def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, trade_date,
                      global_status, first_candle_label,
-                     trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
+                     trail_tiers=None, extended_target_r=EXTENDED_TARGET_R,
+                     include_entry_candle=False):
     if trail_tiers is None:
         trail_tiers = TRAIL_TIERS
 
-    after_entry = day_candles[day_candles.index > entry_time]
+    # When entering at a candle's OPEN (next-candle-open entry), that same candle's
+    # high/low can already hit the stop/target, so it must be included in the walk.
+    if include_entry_candle:
+        after_entry = day_candles[day_candles.index >= entry_time]
+    else:
+        after_entry = day_candles[day_candles.index > entry_time]
     exit_price, exit_reason, exit_time = None, 'EOD_CLOSE', None
     current_stop, current_target = stop, target
     trailed = False
@@ -1851,6 +1857,10 @@ PC_CPR_WIDTH_MIN_PCT = 0.05
 PC_CPR_WIDTH_MAX_PCT = 0.50
 PC_CPR_NEAR_PCT = 0.20
 PC_RR = 2.0
+# Strategies whose signal candle is always the 09:15 IST candle (OD, PPT, Gap Up Rejection)
+# used to "enter" at that candle's close, which is not tradable. When True they now enter
+# at the OPEN of the next candle (09:20 IST) and the stop-loss is rebuilt for that entry.
+PC_NEXT_CANDLE_ENTRY = True
 
 
 def _pc_float(v):
@@ -1997,11 +2007,13 @@ def _pc_virgin_cpr_map(intraday, daily_ohlc):
 
 
 def _pc_make_trade(day_candles, entry_time, signal, entry, stop, target, risk, d,
-                   global_status, strategy_key, reason, trail_tiers, extended_target_r, meta=None):
+                   global_status, strategy_key, reason, trail_tiers, extended_target_r, meta=None,
+                   include_entry_candle=False):
     if entry is None or stop is None or target is None or risk <= 0:
         return None
     trade = _simulate_trade(day_candles, entry_time, signal, float(entry), float(stop), float(target),
-                            float(risk), d, global_status, 'strategy', trail_tiers, extended_target_r)
+                            float(risk), d, global_status, 'strategy', trail_tiers, extended_target_r,
+                            include_entry_candle=include_entry_candle)
     trade['strategy'] = strategy_key
     trade['strategyLabel'] = PIVOTCALL_STRATEGIES.get(strategy_key, strategy_key)
     trade['reason'] = reason
@@ -2242,9 +2254,19 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
         if setup:
             setups += 1
             signal, entry_row, stop_pref, target_pref, reason, meta = setup
+            signal_row = entry_row                      # candle that produced the signal
             entry_time = entry_row.name
             entry = float(entry_row['Close'])
-            stop = _pc_stop(signal, entry, entry_row, lv, stop_pref, stop_buffer)
+            next_open_entry = False
+            if PC_NEXT_CANDLE_ENTRY and entry_time == first.name:
+                # Signal formed on the 09:15 candle -> enter at next candle's open.
+                nxt = rest.iloc[0]
+                entry_time = nxt.name
+                entry = float(nxt['Open'])
+                next_open_entry = True
+            # Stop-loss: still anchored to the signal candle's low/high (+buffer) and the
+            # strategy's preferred level, but validated against the NEW entry price.
+            stop = _pc_stop(signal, entry, signal_row, lv, stop_pref, stop_buffer)
             risk = (entry - stop) if signal == 'BUY' and stop is not None else ((stop - entry) if stop is not None else -1)
             if risk > 0:
                 target = _pc_target(signal, entry, risk, lv, target_pref)
@@ -2253,8 +2275,12 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
                     valid_target = target > entry if signal == 'BUY' else target < entry
                     if valid_target:
                         trade = _pc_make_trade(day, entry_time, signal, entry, stop, target, risk, d,
-                                               status, strategy, reason, trail_tiers, extended_target_r, meta)
+                                               status, strategy, reason, trail_tiers, extended_target_r, meta,
+                                               include_entry_candle=next_open_entry)
                         if trade:
+                            if next_open_entry:
+                                trade['entryMode'] = 'next_candle_open'
+                                trade['signalCandleTime'] = signal_row.name.strftime('%H:%M')
                             trade['globalSource'] = source
                             trades.append(trade)
 
@@ -2281,6 +2307,7 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
         'rules': {
             'source': 'PivotCall eBook — 15 Day Trading Patterns & Strategies',
             'timeframe': '5m', 'oneTradePerDayPerStrategy': True,
+            'entry': 'Setups signalled on the 09:15 candle (OD, PPT, Gap Up Rejection) enter at next 5m candle open; others at signal candle close',
             'target': 'next suitable pivot/support/resistance when >= 2R, otherwise 2R',
             'subjectiveTerms': 'Big/average candle, near level, pin bar and consolidation are converted to deterministic OHLC thresholds.'
         },
