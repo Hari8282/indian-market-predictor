@@ -781,8 +781,8 @@ def _simulate_trade(day_candles, entry_time, signal, entry, stop, target, risk, 
     if trail_tiers is None:
         trail_tiers = TRAIL_TIERS
 
-    # When entering at a candle's OPEN (next-candle-open entry), that same candle's
-    # high/low can already hit the stop/target, so it must be included in the walk.
+    # Optional: include the entry candle itself in the stop/target walk (needed only when
+    # entering at a candle's OPEN). Default False = walk starts after the entry candle.
     if include_entry_candle:
         after_entry = day_candles[day_candles.index >= entry_time]
     else:
@@ -1859,7 +1859,7 @@ PC_CPR_NEAR_PCT = 0.20
 PC_RR = 2.0
 # Strategies whose signal candle is always the 09:15 IST candle (OD, PPT, Gap Up Rejection)
 # used to "enter" at that candle's close, which is not tradable. When True they now enter
-# at the OPEN of the next candle (09:20 IST) and the stop-loss is rebuilt for that entry.
+# at the CLOSE of the next candle (09:20 IST) and the stop-loss is rebuilt for that entry.
 PC_NEXT_CANDLE_ENTRY = True
 
 
@@ -2257,16 +2257,17 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
             signal_row = entry_row                      # candle that produced the signal
             entry_time = entry_row.name
             entry = float(entry_row['Close'])
-            next_open_entry = False
+            next_close_entry = False
             if PC_NEXT_CANDLE_ENTRY and entry_time == first.name:
-                # Signal formed on the 09:15 candle -> enter at next candle's open.
+                # Signal formed on the 09:15 candle -> enter at the 09:20 candle's close.
                 nxt = rest.iloc[0]
+                entry_row = nxt                         # 09:20 candle is now the entry candle
                 entry_time = nxt.name
-                entry = float(nxt['Open'])
-                next_open_entry = True
-            # Stop-loss: still anchored to the signal candle's low/high (+buffer) and the
-            # strategy's preferred level, but validated against the NEW entry price.
-            stop = _pc_stop(signal, entry, signal_row, lv, stop_pref, stop_buffer)
+                entry = float(nxt['Close'])
+                next_close_entry = True
+            # Stop-loss: anchored to the ENTRY candle's low/high (+buffer) and the
+            # strategy's preferred level, validated against the entry price.
+            stop = _pc_stop(signal, entry, entry_row, lv, stop_pref, stop_buffer)
             risk = (entry - stop) if signal == 'BUY' and stop is not None else ((stop - entry) if stop is not None else -1)
             if risk > 0:
                 target = _pc_target(signal, entry, risk, lv, target_pref)
@@ -2276,10 +2277,10 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
                     if valid_target:
                         trade = _pc_make_trade(day, entry_time, signal, entry, stop, target, risk, d,
                                                status, strategy, reason, trail_tiers, extended_target_r, meta,
-                                               include_entry_candle=next_open_entry)
+                                               include_entry_candle=False)
                         if trade:
-                            if next_open_entry:
-                                trade['entryMode'] = 'next_candle_open'
+                            if next_close_entry:
+                                trade['entryMode'] = 'next_candle_close'
                                 trade['signalCandleTime'] = signal_row.name.strftime('%H:%M')
                             trade['globalSource'] = source
                             trades.append(trade)
@@ -2307,7 +2308,7 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
         'rules': {
             'source': 'PivotCall eBook — 15 Day Trading Patterns & Strategies',
             'timeframe': '5m', 'oneTradePerDayPerStrategy': True,
-            'entry': 'Setups signalled on the 09:15 candle (OD, PPT, Gap Up Rejection) enter at next 5m candle open; others at signal candle close',
+            'entry': 'Setups signalled on the 09:15 candle (OD, PPT, Gap Up Rejection) enter at the next (09:20) 5m candle close; others at signal candle close',
             'target': 'next suitable pivot/support/resistance when >= 2R, otherwise 2R',
             'subjectiveTerms': 'Big/average candle, near level, pin bar and consolidation are converted to deterministic OHLC thresholds.'
         },
