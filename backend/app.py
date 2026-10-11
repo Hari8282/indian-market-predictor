@@ -1876,6 +1876,12 @@ PC_GUR_APPROACH_PCT = 0.0015         # candle high within 0.15% below level coun
 PC_GUR_PIERCE_PCT = 0.0030           # wick may poke up to 0.30% above the level and still reject
 PC_GUR_BREAKDOWN_WINDOW = 3          # candles allowed for the breakdown trigger ('breakdown' mode)
 PC_GUR_LAST_SIGNAL_HHMM = (11, 0)    # ignore rejection candles after this IST time
+# First (09:15) candle must be above the CPR (above CPR_HIGH = max(TC, BC)):
+#   'close' = first candle close above CPR (same test as the main strategy's above_tc)
+#   'body'  = first candle open AND close above CPR
+#   'full'  = entire first candle (its low) above CPR
+#   'off'   = no CPR filter
+PC_GUR_FIRST_CANDLE_CPR = 'close'    # 'close' | 'body' | 'full' | 'off'
 # Target / trailing — same principle as the main app strategy (run_backtest):
 #   initial target = entry - risk * PC_GUR_MIN_RR  (fixed R-multiple, default 2R)
 #   trailing       = TRAIL_TIERS (SL -> breakeven at 1.5R, lock 0.5R at 2R, 1.5R at 3R, 3R at 4R)
@@ -2133,7 +2139,15 @@ def _pc_find_setup(strategy, day, rest, first, levels, prev, prior_open_ranges, 
     #    candle (red or bear pin) -> SELL. One signal per day (the first valid rejection).
     if strategy == 'gap_up_rejection':
         gap_vs_close_pct = ((gap['open'] - gap['prevClose']) / gap['prevClose'] * 100.0) if gap['prevClose'] else 0.0
-        if gap['gapUp'] or gap_vs_close_pct >= PC_GAP_MIN_PCT:
+        if PC_GUR_FIRST_CANDLE_CPR == 'full':
+            first_above_cpr = f['low'] > cpr_high
+        elif PC_GUR_FIRST_CANDLE_CPR == 'body':
+            first_above_cpr = min(f['open'], f['close']) > cpr_high
+        elif PC_GUR_FIRST_CANDLE_CPR == 'off':
+            first_above_cpr = True
+        else:
+            first_above_cpr = f['close'] > cpr_high
+        if (gap['gapUp'] or gap_vs_close_pct >= PC_GAP_MIN_PCT) and first_above_cpr:
             lvl_map = {k: levels.get(k) for k in PC_GUR_LEVELS}
             lvl_map = {k: float(v) for k, v in lvl_map.items() if v is not None and np.isfinite(v)}
             last_h, last_m = PC_GUR_LAST_SIGNAL_HHMM
@@ -2167,7 +2181,8 @@ def _pc_find_setup(strategy, day, rest, first, levels, prev, prior_open_ranges, 
 
                 meta = {'resistanceLevel': lvl_name, 'resistance': round(lvl_price, 2),
                         'rejectionHigh': round(c['high'], 2), 'rejectionLow': round(c['low'], 2),
-                        'gapPct': round(gap_vs_close_pct, 3), 'stopAnchor': anchor,
+                        'gapPct': round(gap_vs_close_pct, 3), 'cprHigh': round(cpr_high, 2), 'firstCandleAboveCPR': True,
+                        'stopAnchor': anchor,
                         'entryMode': PC_GUR_ENTRY_MODE}
 
                 if PC_GUR_ENTRY_MODE == 'breakdown':
