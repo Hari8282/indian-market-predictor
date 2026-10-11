@@ -1869,7 +1869,10 @@ PC_NEXT_CANDLE_ENTRY = True
 # Gap DOWN (BUY) : exact mirror — gap-down open (below previous-day close by >= PC_GAP_MIN_PCT,
 #                  or below PDL), first candle below CPR, price tests S1 / S2 / PDL, bullish
 #                  rejection candle (green or bull pin bar) -> BUY.
-# Entry : 'close'     -> enter at the close of the rejection candle
+# Two-step entry: (1) PINPOINT REJECTION candle at the NEAREST resistance (gap up) / support (gap down),
+#                 (2) the ENTRY candle is a LATER candle — never the rejection candle itself.
+# Entry : 'close'     -> enter at the close of the candle right after the rejection candle
+#                        (skipped if that candle trades back through the rejection extreme)
 #         'breakdown' -> SELL when a later candle trades below the rejection low
 #                        (BUY when a later candle trades above the rejection high)
 # SL    : buffer % beyond the rejection-candle extreme and/or the tested pivot level
@@ -1878,11 +1881,12 @@ PC_GAPREJ_ENTRY_MODE = 'close'          # 'close' | 'breakdown'
 PC_GAPREJ_STOP_MODE = 'max'             # 'candle' | 'level' | 'max'
 PC_GAPREJ_RESISTANCE = ('R1', 'R2', 'PDH')   # gap-up : levels that may reject price
 PC_GAPREJ_SUPPORT = ('S1', 'S2', 'PDL')      # gap-down: levels that may hold price
-PC_GAPREJ_APPROACH_PCT = 0.0015         # candle extreme within 0.15% of level counts as "testing" it
-PC_GAPREJ_PIERCE_PCT = 0.0030           # wick may poke up to 0.30% through the level and still reject
+PC_GAPREJ_APPROACH_PCT = 0.0005         # pinpoint: candle extreme must come within 0.05% of the level (~11 pts on NIFTY)
+PC_GAPREJ_PIERCE_PCT = 0.0015           # wick may poke up to 0.15% through the level and still reject
+PC_GAPREJ_NEAREST_ONLY = True           # rejection must be at the NEAREST level beyond the candle close (R1 before R2, etc.)
 PC_GAPREJ_BREAKDOWN_WINDOW = 3          # candles allowed for the breakdown trigger ('breakdown' mode)
-PC_GAPREJ_EARLIEST_HHMM = (9, 20)       # rejection/entry candle must start AFTER this IST time (>= 09:25)
-PC_GAPREJ_LAST_SIGNAL_HHMM = (11, 0)    # ignore rejection candles after this IST time
+PC_GAPREJ_EARLIEST_HHMM = (9, 20)       # ENTRY candle must start AFTER this IST time (>= 09:25)
+PC_GAPREJ_LAST_SIGNAL_HHMM = (11, 0)    # ignore entry candles after this IST time
 # First (09:15) candle vs CPR — gap up: must be ABOVE CPR_HIGH; gap down: must be BELOW CPR_LOW.
 #   'close' = first candle close beyond CPR (same test as the main strategy's above_tc / below_bc)
 #   'body'  = first candle open AND close beyond CPR
@@ -2060,18 +2064,21 @@ def _pc_make_trade(day_candles, entry_time, signal, entry, stop, target, risk, d
 def _pc_gap_rejection(side, day, levels, gap, f):
     """Shared Gap Up (side='SELL') / Gap Down (side='BUY') rejection finder.
 
-    Returns the _pc_find_setup tuple or None. One signal per day (first valid rejection).
+    Step 1: a pinpoint rejection candle at the NEAREST resistance (SELL) / support (BUY).
+    Step 2: the entry candle is a LATER candle (never the rejection candle itself) and must
+            start after PC_GAPREJ_EARLIEST_HHMM (09:20).
+    Returns the _pc_find_setup tuple or None. One signal per day.
     """
     sell = (side == 'SELL')
     cpr_low, cpr_high = levels['CPR_LOW'], levels['CPR_HIGH']
     if sell:
         gap_pct = ((gap['open'] - gap['prevClose']) / gap['prevClose'] * 100.0) if gap['prevClose'] else 0.0
         gap_ok = gap['gapUp'] or gap_pct >= PC_GAP_MIN_PCT
-        names, tag, lvl_word = PC_GAPREJ_RESISTANCE, 'Gap Up Rejection', 'rejection'
+        names, tag = PC_GAPREJ_RESISTANCE, 'Gap Up Rejection'
     else:
         gap_pct = ((gap['prevClose'] - gap['open']) / gap['prevClose'] * 100.0) if gap['prevClose'] else 0.0
         gap_ok = gap['gapDown'] or gap_pct >= PC_GAP_MIN_PCT
-        names, tag, lvl_word = PC_GAPREJ_SUPPORT, 'Gap Down Rejection', 'bounce'
+        names, tag = PC_GAPREJ_SUPPORT, 'Gap Down Rejection'
     if not gap_ok:
         return None
 
@@ -2094,14 +2101,9 @@ def _pc_gap_rejection(side, day, levels, gap, f):
     lvl_map = {k: float(v) for k, v in lvl_map.items() if v is not None and np.isfinite(v)}
     earliest, latest = PC_GAPREJ_EARLIEST_HHMM, PC_GAPREJ_LAST_SIGNAL_HHMM
     n = len(day)
-    for pos in range(n):
+
+    for pos in range(n - 1):                       # rejection candle; an entry candle must follow it
         row = day.iloc[pos]
-        ts = day.index[pos]
-        hhmm = (ts.hour, ts.minute)
-        if hhmm <= earliest:
-            continue                                   # candle must be after 09:20
-        if hhmm > latest:
-            break
         c = _pc_candle(row)
         if c['range'] <= 0:
             continue
@@ -2110,21 +2112,32 @@ def _pc_gap_rejection(side, day, levels, gap, f):
         if not sell and not (_pc_bullish(row) or _pc_bull_pin(row)):
             continue
 
-        tested = []
-        for name, lv_price in lvl_map.items():
+        # ---- Step 1: pinpoint rejection at the NEAREST level beyond the candle close ----
+        if sell:
+            cands = {k: v for k, v in lvl_map.items() if v > c['close']}
+        else:
+            cands = {k: v for k, v in lvl_map.items() if v < c['close']}
+        if not cands:
+            continue
+        if PC_GAPREJ_NEAREST_ONLY:
+            lvl_name = min(cands, key=lambda k: cands[k]) if sell else max(cands, key=lambda k: cands[k])
+            cands = {lvl_name: cands[lvl_name]}
+        hit = None
+        for name, lv_price in cands.items():
             if sell:
-                hit = (c['high'] >= lv_price * (1 - PC_GAPREJ_APPROACH_PCT)
-                       and c['high'] <= lv_price * (1 + PC_GAPREJ_PIERCE_PCT) and c['close'] < lv_price)
+                ok = (c['high'] >= lv_price * (1 - PC_GAPREJ_APPROACH_PCT)
+                      and c['high'] <= lv_price * (1 + PC_GAPREJ_PIERCE_PCT))
                 dist = abs(c['high'] - lv_price)
             else:
-                hit = (c['low'] <= lv_price * (1 + PC_GAPREJ_APPROACH_PCT)
-                       and c['low'] >= lv_price * (1 - PC_GAPREJ_PIERCE_PCT) and c['close'] > lv_price)
+                ok = (c['low'] <= lv_price * (1 + PC_GAPREJ_APPROACH_PCT)
+                      and c['low'] >= lv_price * (1 - PC_GAPREJ_PIERCE_PCT))
                 dist = abs(c['low'] - lv_price)
-            if hit:
-                tested.append((dist, name, lv_price))
-        if not tested:
+            if ok and (hit is None or dist < hit[0]):
+                hit = (dist, name, lv_price)
+        if hit is None:
             continue
-        _, lvl_name, lvl_price = min(tested)
+        _, lvl_name, lvl_price = hit
+        rej_time = day.index[pos].strftime('%H:%M')
 
         # Stop anchor (buffer applied in the runner): beyond candle extreme and/or pivot level.
         if sell:
@@ -2137,39 +2150,37 @@ def _pc_gap_rejection(side, day, levels, gap, f):
         meta = {'resistanceLevel' if sell else 'supportLevel': lvl_name,
                 'resistance' if sell else 'support': round(lvl_price, 2),
                 'rejectionHigh': round(c['high'], 2), 'rejectionLow': round(c['low'], 2),
+                'rejectionCandleTime': rej_time, 'signalCandleTime': rej_time,
                 'gapPct': round(gap_pct, 3),
                 'cprHigh' if sell else 'cprLow': round(cpr_high if sell else cpr_low, 2),
                 'firstCandleAboveCPR' if sell else 'firstCandleBelowCPR': True,
                 'stopAnchor': anchor, 'entryMode': PC_GAPREJ_ENTRY_MODE}
 
-        if PC_GAPREJ_ENTRY_MODE == 'breakdown':
-            for q in range(pos + 1, min(n, pos + 1 + PC_GAPREJ_BREAKDOWN_WINDOW)):
-                nrow = day.iloc[q]
-                nh, nl, no = float(nrow['High']), float(nrow['Low']), float(nrow['Open'])
-                if sell:
-                    if nl < c['low']:
-                        meta['entryPrice'] = min(c['low'], no)     # gap-through fills at the open
-                        break
-                    if nh > c['high']:
-                        nrow = None; break                          # setup invalidated
-                else:
-                    if nh > c['high']:
-                        meta['entryPrice'] = max(c['high'], no)
-                        break
-                    if nl < c['low']:
-                        nrow = None; break
+        # ---- Step 2: entry candle AFTER the rejection candle ----
+        window = PC_GAPREJ_BREAKDOWN_WINDOW if PC_GAPREJ_ENTRY_MODE == 'breakdown' else 1
+        for q in range(pos + 1, min(n, pos + 1 + window)):
+            nrow = day.iloc[q]
+            nts = day.index[q]
+            nhhmm = (nts.hour, nts.minute)
+            nh, nl, no, ncl = (float(nrow['High']), float(nrow['Low']),
+                               float(nrow['Open']), float(nrow['Close']))
+            if nhhmm > latest:
+                break
+            failed = (nh > c['high']) if sell else (nl < c['low'])   # price took out the rejection extreme
+            if PC_GAPREJ_ENTRY_MODE == 'breakdown':
+                trig = (nl < c['low']) if sell else (nh > c['high'])
+                if trig and nhhmm > earliest:
+                    meta['entryPrice'] = min(c['low'], no) if sell else max(c['high'], no)  # gap-through fills at open
+                    meta['includeEntryCandle'] = True
+                    why = 'broke below rejection-candle low' if sell else 'broke above rejection-candle high'
+                    return (side, nrow, None, None, f'{tag}: pinpoint rejection at {lvl_name} ({rej_time}), entry candle {why}', meta)
+                if failed and not trig:
+                    break                                           # rejection invalidated
             else:
-                nrow = None
-            if nrow is None or 'entryPrice' not in meta:
-                continue                                            # no trigger -> next rejection
-            meta['includeEntryCandle'] = True
-            meta['signalCandleTime'] = ts.strftime('%H:%M')
-            trig = 'broke below rejection-candle low' if sell else 'broke above rejection-candle high'
-            return (side, nrow, None, None, f'{tag}: {lvl_word} at {lvl_name}, {trig}', meta)
-
-        meta['entryPrice'] = c['close']
-        meta['signalCandleTime'] = ts.strftime('%H:%M')
-        return (side, row, None, None, f'{tag}: {"bearish rejection" if sell else "bullish rejection"} candle at {lvl_name}, entry at candle close', meta)
+                if failed or nhhmm <= earliest:
+                    break                                           # invalidated, or entry candle not after 09:20
+                meta['entryPrice'] = ncl
+                return (side, nrow, None, None, f'{tag}: pinpoint rejection at {lvl_name} ({rej_time}), entry at close of next candle', meta)
     return None
 
 
@@ -2472,7 +2483,7 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
         'rules': {
             'source': 'PivotCall eBook — 15 Day Trading Patterns & Strategies',
             'timeframe': '5m', 'oneTradePerDayPerStrategy': True,
-            'entry': 'OD/PPT (09:15 signal) enter at the next (09:20) 5m candle close; Gap Up/Down Rejection enter at the rejection candle close (or on breakdown of its low / high, PC_GAPREJ_ENTRY_MODE) and only on candles after 09:20; others at signal candle close',
+            'entry': 'OD/PPT (09:15 signal) enter at the next (09:20) 5m candle close; Gap Up/Down Rejection: pinpoint rejection candle at the nearest resistance/support, then entry on a LATER candle (close of the next candle, or breakdown of the rejection low / high; PC_GAPREJ_ENTRY_MODE), entry candle after 09:20; others at signal candle close',
             'target': 'next suitable pivot/support/resistance when >= 2R, otherwise 2R (Gap Up/Down Rejection: fixed 2R like the main strategy)',
             'trailing': 'TRAIL_TIERS: SL to breakeven at 1.5R, lock 0.5R at 2R, 1.5R at 3R, 3R at 4R; target extends to 10R once trailing starts',
             'subjectiveTerms': 'Big/average candle, near level, pin bar and consolidation are converted to deterministic OHLC thresholds.'
