@@ -958,6 +958,13 @@
     "status": "bearish",
     "total": 10
   },
+  "2026-10-12": {
+    "frozenAt": "2026-10-13T19:03:50.523856+05:30",
+    "positive": 6,
+    "source": "auto",
+    "status": "neutral",
+    "total": 10
+  },
   "2026-10-13": {
     "capturedAt": "2026-10-13T10:05:33.440994+05:30",
     "indices": [
