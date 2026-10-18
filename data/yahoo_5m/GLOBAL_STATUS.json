@@ -1146,5 +1146,19 @@
     "source": "morning_snapshot_0915",
     "status": "bearish",
     "total": 10
+  },
+  "2026-10-15": {
+    "frozenAt": "2026-10-18T18:54:50.458991+05:30",
+    "positive": 10,
+    "source": "auto",
+    "status": "bullish",
+    "total": 10
+  },
+  "2026-10-16": {
+    "frozenAt": "2026-10-18T18:54:50.463214+05:30",
+    "positive": 7,
+    "source": "auto",
+    "status": "bullish",
+    "total": 10
   }
 }
