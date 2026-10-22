@@ -1878,11 +1878,11 @@ PC_NEXT_CANDLE_ENTRY = True
 # SL    : buffer % beyond the rejection-candle extreme and/or the tested pivot level
 #         'candle' = candle extreme, 'level' = pivot level, 'max' = the safer (wider) of the two
 PC_GAPREJ_ENTRY_MODE = 'close'          # 'close' | 'breakdown'
-PC_GAPREJ_STOP_MODE = 'max'             # 'candle' | 'level' | 'max'
+PC_GAPREJ_STOP_MODE = 'candle'         # Fine-tuned on supplied 5m sample: 'candle' | 'level' | 'max'
 PC_GAPREJ_RESISTANCE = ('R1', 'R2', 'PDH')   # gap-up : levels that may reject price
 PC_GAPREJ_SUPPORT = ('S1', 'S2', 'PDL')      # gap-down: levels that may hold price
-PC_GAPREJ_APPROACH_PCT = 0.0005         # pinpoint: candle extreme must come within 0.05% of the level (~11 pts on NIFTY)
-PC_GAPREJ_PIERCE_PCT = 0.0015           # wick may poke up to 0.15% through the level and still reject
+PC_GAPREJ_APPROACH_PCT = 0.0003         # Fine-tuned: rejection candle extreme within 0.03% of level
+PC_GAPREJ_PIERCE_PCT = 0.0010           # Fine-tuned: wick may poke up to 0.10% through level
 PC_GAPREJ_NEAREST_ONLY = True           # rejection must be at the NEAREST level beyond the candle close (R1 before R2, etc.)
 PC_GAPREJ_BREAKDOWN_WINDOW = 3          # candles allowed for the breakdown trigger ('breakdown' mode)
 PC_GAPREJ_EARLIEST_HHMM = (9, 20)       # ENTRY candle must start AFTER this IST time (>= 09:25)
@@ -1899,7 +1899,7 @@ PC_GAPREJ_FIRST_CANDLE_CPR = 'close'    # 'close' | 'body' | 'full' | 'off'
 #   once trailing starts the target is extended to EXTENDED_TARGET_R (10R)
 # 'fixed_rr' = app principle; 'pivot' = legacy "nearest pivot giving >= 2R".
 PC_GAPREJ_TARGET_MODE = 'fixed_rr'      # 'fixed_rr' | 'pivot'
-PC_GAPREJ_MIN_RR = 2.0
+PC_GAPREJ_MIN_RR = 2.5                  # Fine-tuned: fixed 2.5R initial target
 
 
 def _pc_float(v):
