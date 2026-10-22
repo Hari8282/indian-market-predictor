@@ -1251,5 +1251,12 @@
     "source": "morning_snapshot_0915",
     "status": "neutral",
     "total": 10
+  },
+  "2026-10-21": {
+    "frozenAt": "2026-10-22T20:03:02.650986+05:30",
+    "positive": 6,
+    "source": "auto",
+    "status": "neutral",
+    "total": 10
   }
 }
