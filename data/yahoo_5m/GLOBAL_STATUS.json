@@ -1259,6 +1259,13 @@
     "status": "neutral",
     "total": 10
   },
+  "2026-10-22": {
+    "frozenAt": "2026-10-23T20:08:33.537513+05:30",
+    "positive": 4,
+    "source": "auto",
+    "status": "neutral",
+    "total": 10
+  },
   "2026-10-23": {
     "capturedAt": "2026-10-23T11:38:19.098055+05:30",
     "indices": [
