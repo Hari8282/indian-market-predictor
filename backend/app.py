@@ -1842,6 +1842,7 @@ PIVOTCALL_STRATEGIES = {
     'cprbo': 'CPRBO — CPR Breakout',
     'rcbo': 'RCBO — Red Candle Breakout',
     'gcbo': 'GCBO — Green Candle Breakout',
+    'inside_bar': 'IBB — Inside Bar Micro-Breakout',
 }
 
 # Deterministic backtest interpretations of subjective chart-reading terms.
@@ -2200,6 +2201,41 @@ def _pc_find_setup(strategy, day, rest, first, levels, prev, prior_open_ranges, 
             return None
         row = rest.iloc[pos]
         return sig, row, stop_pref, target_pref, reason, (meta or {})
+
+    # 0) IBB — Inside Bar Micro-Breakout.
+    # Pattern: mother bar (t-2), fully-contained inside bar (t-1), breakout bar (t).
+    # Require breakout close beyond the mother-bar boundary and breakout body > 50%
+    # of its own range. Entry is the breakout candle close; stop is beyond the inside
+    # bar extreme with the same configurable buffer used by the other setup strategies.
+    if strategy == 'inside_bar' and len(day) >= 3:
+        for i in range(2, len(day)):
+            mother = _pc_candle(day.iloc[i - 2])
+            inside = _pc_candle(day.iloc[i - 1])
+            breakout_row = day.iloc[i]
+            breakout = _pc_candle(breakout_row)
+            if mother['range'] <= 0 or inside['range'] <= 0 or breakout['range'] <= 0:
+                continue
+            is_inside = (inside['high'] <= mother['high'] and
+                         inside['low'] >= mother['low'] and
+                         (inside['high'] < mother['high'] or inside['low'] > mother['low']))
+            if not is_inside or breakout['body'] / breakout['range'] <= 0.50:
+                continue
+            if breakout['close'] > mother['high'] and breakout['close'] > breakout['open']:
+                return ('BUY', breakout_row, inside['low'], None,
+                        'IBB: bullish close above mother-bar high; breakout body > 50% of range',
+                        {'motherHigh': round(mother['high'], 2),
+                         'motherLow': round(mother['low'], 2),
+                         'insideHigh': round(inside['high'], 2),
+                         'insideLow': round(inside['low'], 2),
+                         'stopAnchor': inside['low'], 'insideBarConfirmed': True})
+            if breakout['close'] < mother['low'] and breakout['close'] < breakout['open']:
+                return ('SELL', breakout_row, inside['high'], None,
+                        'IBB: bearish close below mother-bar low; breakout body > 50% of range',
+                        {'motherHigh': round(mother['high'], 2),
+                         'motherLow': round(mother['low'], 2),
+                         'insideHigh': round(inside['high'], 2),
+                         'insideLow': round(inside['low'], 2),
+                         'stopAnchor': inside['high'], 'insideBarConfirmed': True})
 
     # 1) OD — first 5m candle closes outside previous-day range.
     if strategy == 'od':
