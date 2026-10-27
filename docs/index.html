@@ -1010,6 +1010,7 @@
                         <option value="cprbo">CPRBO — CPR Breakout</option>
                         <option value="rcbo">RCBO — Red Candle Breakout</option>
                         <option value="gcbo">GCBO — Green Candle Breakout</option>
+                        <option value="inside_bar">IBB — Inside Bar Micro-Breakout</option>
                     </select>
                     <select id="backtestSymbol" style="background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px 10px;font-size:12px;">
                         <option value="nifty">NIFTY 50</option>
@@ -1176,7 +1177,8 @@ function updateBacktestStrategyHelp() {
         w_reversal:'W Reversal: failed downside trend, trapped shorts, then retest of the reversal low.',
         cprbo:'CPRBO: CPR consolidation followed by a bullish or bearish CPR breakout.',
         rcbo:'RCBO: first red candle high breakout; CPR resistance is avoided; large entry candles may use PDH as structural stop.',
-        gcbo:'GCBO: first green candle low breakdown; CPR support is avoided; large entry candles may use structural pivot support.'
+        gcbo:'GCBO: first green candle low breakdown; CPR support is avoided; large entry candles may use structural pivot support.',
+        inside_bar:'IBB: three-candle setup (mother bar → fully-contained inside bar → breakout bar). Enter at breakout close only when it closes beyond the mother-bar high/low with body > 50% of range. Stop uses the inside-bar low/high plus the existing stop buffer; target and trailing use the app’s existing 2R/pivot target and trailing rules.'
     };
     if (help) help.textContent = labels[strategy] || labels.existing;
 }
