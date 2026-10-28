@@ -1010,7 +1010,6 @@
                         <option value="cprbo">CPRBO — CPR Breakout</option>
                         <option value="rcbo">RCBO — Red Candle Breakout</option>
                         <option value="gcbo">GCBO — Green Candle Breakout</option>
-                        <option value="inside_bar">IBB — Inside Bar Micro-Breakout</option>
                     </select>
                     <select id="backtestSymbol" style="background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px 10px;font-size:12px;">
                         <option value="nifty">NIFTY 50</option>
@@ -1023,12 +1022,7 @@
                         <option value="100" selected>Last 100 days</option>
                     </select>
                     <button class="journal-refresh-btn" onclick="runBacktest()">Run Backtest</button>
-                    <label style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;">Cost / trade (points)
-                        <input id="ibbCostPerTrade" type="number" min="0" step="0.5" value="0" style="width:82px;background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px;">
-                    </label>
-                    <button class="journal-refresh-btn" onclick="runIbbDiagnostic()">Compare IBB Variants</button>
                 </div>
-                <div id="ibbDiagnosticPanel" style="display:none;margin:0 0 14px;padding:12px;border:1px solid rgba(148,163,184,.22);border-radius:10px;background:rgba(15,23,42,.55);"></div>
                 <div id="backtestStrategyHelp" style="font-size:12px;color:#94a3b8;margin:-4px 0 12px;">Existing Strategy: current production backtest logic. The 15 PivotCall setups run through a separate endpoint and do not modify the existing strategy.</div>
 
                 <div class="journal-stats" id="backtestStats" style="grid-template-columns:repeat(8,minmax(0,1fr));">
@@ -1182,8 +1176,7 @@ function updateBacktestStrategyHelp() {
         w_reversal:'W Reversal: failed downside trend, trapped shorts, then retest of the reversal low.',
         cprbo:'CPRBO: CPR consolidation followed by a bullish or bearish CPR breakout.',
         rcbo:'RCBO: first red candle high breakout; CPR resistance is avoided; large entry candles may use PDH as structural stop.',
-        gcbo:'GCBO: first green candle low breakdown; CPR support is avoided; large entry candles may use structural pivot support.',
-        inside_bar:'IBB: mother bar → fully contained inside bar → confirmed breakout close with body > configured threshold. Stop uses the inside-bar extreme plus existing buffer. Use Compare IBB Variants to evaluate stronger body confirmation, EMA20/EMA50 trend filtering and fixed 2R vs pivot target; compare gross and estimated cost-adjusted results.'
+        gcbo:'GCBO: first green candle low breakdown; CPR support is avoided; large entry candles may use structural pivot support.'
     };
     if (help) help.textContent = labels[strategy] || labels.existing;
 }
@@ -1599,36 +1592,6 @@ function setConnection(connected, message) {
             } catch (e) {
                 console.warn('Backtest fetch failed:', e);
                 if (body) body.innerHTML = `<tr><td colspan="13" class="journal-empty">Backtest failed: ${e.message}</td></tr>`;
-            }
-        }
-
-        async function runIbbDiagnostic() {
-            const panel = document.getElementById('ibbDiagnosticPanel');
-            const symbol = document.getElementById('backtestSymbol')?.value || 'nifty';
-            const days = document.getElementById('backtestDays')?.value || '100';
-            const cost = Math.max(0, Number(document.getElementById('ibbCostPerTrade')?.value || 0));
-            if (!panel) return;
-            panel.style.display = 'block';
-            panel.innerHTML = '<div style="color:#cbd5e1;font-size:12px;">Comparing IBB variants on the same 5-minute history...</div>';
-            try {
-                const base = normalizeApiBase(API_BASE_URL);
-                const url = `${base}/api/backtest/inside-bar/diagnostic?symbol=${encodeURIComponent(symbol)}&days=${encodeURIComponent(days)}&cost_per_trade_points=${encodeURIComponent(cost)}`;
-                const response = await fetch(url);
-                const raw = await response.text();
-                let data;
-                try { data = JSON.parse(raw); } catch (_) { throw new Error(`HTTP ${response.status}: non-JSON response`); }
-                if (!response.ok) throw new Error(data.error || data.details || `HTTP ${response.status}`);
-                const variants = Array.isArray(data.variants) ? data.variants : [];
-                const n = v => (v === null || v === undefined) ? '--' : (typeof v === 'number' ? v.toFixed(2) : String(v));
-                panel.innerHTML = `
-                    <div style="font-weight:800;color:#e2e8f0;margin-bottom:8px;">IBB Variant Comparison · ${safeString(data.symbol,'NIFTY')} · ${safeString(String(data.daysRequested),'--')} days</div>
-                    <div style="overflow-x:auto;"><table class="journal-table"><thead><tr><th>Variant</th><th>Trades</th><th>Win %</th><th>Gross P&amp;L (pts)</th><th>Net P&amp;L (pts)</th><th>Profit factor</th><th>Max DD (pts)</th><th>Expectancy (R)</th></tr></thead><tbody>${variants.map(v => {
-                        const st = v.stats || {};
-                        return `<tr><td>${safeString(v.label,'--')}</td><td>${n(st.totalTrades)}</td><td>${n(st.winRate)}%</td><td>${n(st.totalPnlPoints)}</td><td>${n(v.netPnlAfterCostsPoints)}</td><td>${n(st.profitFactor)}</td><td>${n(st.maxDrawdownPoints)}</td><td>${n(st.expectancyR)}</td></tr>`;
-                    }).join('')}</tbody></table></div>
-                    <div style="font-size:11px;color:#94a3b8;margin-top:8px;">Cost assumption: ${n(data.costPerTradePoints)} points per completed trade. EMA filters use causal 5-minute EMAs. No variant is auto-selected; validate on unseen data before live use.</div>`;
-            } catch (e) {
-                panel.innerHTML = `<div style="color:#fca5a5;font-size:12px;">IBB comparison failed: ${safeString(e.message,'Unknown error')}</div>`;
             }
         }
 
