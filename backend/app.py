@@ -649,7 +649,7 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
         }
 
     cutoff = now_ist() - timedelta(days=days)
-    intraday = intraday[intraday.index >= cutoff].copy()
+    intraday = intraday[intraday.index >= cutoff]
     if len(intraday) == 0:
         return {
             "symbol": symbol, "trades": [], "stats": _backtest_stats([]),
@@ -861,22 +861,12 @@ def _backtest_stats(trades):
         return {
             "totalTrades": 0, "wins": 0, "losses": 0, "winRate": 0.0,
             "totalPnlPoints": 0.0, "avgPnlPoints": 0.0, "avgRiskReward": 0.0,
-            "profitFactor": None, "maxDrawdownPoints": 0.0, "expectancyR": None,
             "targetHits": 0, "stopOuts": 0, "trailedStops": 0, "eodCloses": 0
         }
     wins = [t for t in trades if t['pnlPoints'] > 0]
     losses = [t for t in trades if t['pnlPoints'] <= 0]
     total_pnl = sum(t['pnlPoints'] for t in trades)
     rr_values = [t['riskReward'] for t in trades if isinstance(t.get('riskReward'), (int, float))]
-    gross_wins = sum(t['pnlPoints'] for t in trades if t['pnlPoints'] > 0)
-    gross_losses = abs(sum(t['pnlPoints'] for t in trades if t['pnlPoints'] < 0))
-    equity = peak = max_drawdown = 0.0
-    for trade in trades:
-        equity += float(trade.get('pnlPoints') or 0.0)
-        peak = max(peak, equity)
-        max_drawdown = max(max_drawdown, peak - equity)
-    initial_r_values = [float(t['pnlPoints']) / float(t['initialRisk']) for t in trades
-                        if float(t.get('initialRisk') or 0) > 0]
     return {
         "totalTrades": len(trades),
         "wins": len(wins),
@@ -885,9 +875,6 @@ def _backtest_stats(trades):
         "totalPnlPoints": round(total_pnl, 2),
         "avgPnlPoints": round(total_pnl / len(trades), 2),
         "avgRiskReward": round(sum(rr_values) / len(rr_values), 2) if rr_values else 0.0,
-        "profitFactor": round(gross_wins / gross_losses, 2) if gross_losses > 0 else (None if gross_wins == 0 else 'Infinity'),
-        "maxDrawdownPoints": round(max_drawdown, 2),
-        "expectancyR": round(sum(initial_r_values) / len(initial_r_values), 3) if initial_r_values else None,
         "targetHits": sum(1 for t in trades if t['status'] == 'TARGET_HIT'),
         "stopOuts": sum(1 for t in trades if t['status'] == 'STOPPED_OUT'),
         "trailedStops": sum(1 for t in trades if t['status'] == 'TRAILED_STOP'),
@@ -1855,7 +1842,6 @@ PIVOTCALL_STRATEGIES = {
     'cprbo': 'CPRBO — CPR Breakout',
     'rcbo': 'RCBO — Red Candle Breakout',
     'gcbo': 'GCBO — Green Candle Breakout',
-    'inside_bar': 'IBB — Inside Bar Micro-Breakout',
 }
 
 # Deterministic backtest interpretations of subjective chart-reading terms.
@@ -2198,8 +2184,7 @@ def _pc_gap_rejection(side, day, levels, gap, f):
     return None
 
 
-def _pc_find_setup(strategy, day, rest, first, levels, prev, prior_open_ranges, virgin_map,
-                   ibb_min_body_ratio=0.50, ibb_trend_filter=False):
+def _pc_find_setup(strategy, day, rest, first, levels, prev, prior_open_ranges, virgin_map):
     """Return (signal, entry_row, stop_preference, target_preference, reason, meta) or None."""
     f = _pc_candle(first)
     gap = _pc_gap(prev, first)
@@ -2215,49 +2200,6 @@ def _pc_find_setup(strategy, day, rest, first, levels, prev, prior_open_ranges, 
             return None
         row = rest.iloc[pos]
         return sig, row, stop_pref, target_pref, reason, (meta or {})
-
-    # 0) IBB — Inside Bar Micro-Breakout.
-    # Pattern: mother bar (t-2), fully-contained inside bar (t-1), breakout bar (t).
-    # Require breakout close beyond the mother-bar boundary and breakout body > 50%
-    # of its own range. Entry is the breakout candle close; stop is beyond the inside
-    # bar extreme with the same configurable buffer used by the other setup strategies.
-    if strategy == 'inside_bar' and len(day) >= 3:
-        for i in range(2, len(day)):
-            mother = _pc_candle(day.iloc[i - 2])
-            inside = _pc_candle(day.iloc[i - 1])
-            breakout_row = day.iloc[i]
-            breakout = _pc_candle(breakout_row)
-            if mother['range'] <= 0 or inside['range'] <= 0 or breakout['range'] <= 0:
-                continue
-            is_inside = (inside['high'] <= mother['high'] and
-                         inside['low'] >= mother['low'] and
-                         (inside['high'] < mother['high'] or inside['low'] > mother['low']))
-            if not is_inside or breakout['body'] / breakout['range'] <= ibb_min_body_ratio:
-                continue
-            ema20 = _pc_float(breakout_row.get('IBB_EMA20')) if hasattr(breakout_row, 'get') else None
-            ema50 = _pc_float(breakout_row.get('IBB_EMA50')) if hasattr(breakout_row, 'get') else None
-            if ibb_trend_filter and (ema20 is None or ema50 is None):
-                continue
-            if breakout['close'] > mother['high'] and breakout['close'] > breakout['open']:
-                if ibb_trend_filter and not (breakout['close'] > ema20 and ema20 > ema50):
-                    continue
-                return ('BUY', breakout_row, inside['low'], None,
-                        'IBB: bullish close above mother-bar high; breakout body > 50% of range',
-                        {'motherHigh': round(mother['high'], 2),
-                         'motherLow': round(mother['low'], 2),
-                         'insideHigh': round(inside['high'], 2),
-                         'insideLow': round(inside['low'], 2),
-                         'stopAnchor': inside['low'], 'insideBarConfirmed': True})
-            if breakout['close'] < mother['low'] and breakout['close'] < breakout['open']:
-                if ibb_trend_filter and not (breakout['close'] < ema20 and ema20 < ema50):
-                    continue
-                return ('SELL', breakout_row, inside['high'], None,
-                        'IBB: bearish close below mother-bar low; breakout body > 50% of range',
-                        {'motherHigh': round(mother['high'], 2),
-                         'motherLow': round(mother['low'], 2),
-                         'insideHigh': round(inside['high'], 2),
-                         'insideLow': round(inside['low'], 2),
-                         'stopAnchor': inside['high'], 'insideBarConfirmed': True})
 
     # 1) OD — first 5m candle closes outside previous-day range.
     if strategy == 'od':
@@ -2408,9 +2350,7 @@ def _pc_find_setup(strategy, day, rest, first, levels, prev, prior_open_ranges, 
 
 
 def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUFFER_PCT,
-                           trail_tiers=None, extended_target_r=EXTENDED_TARGET_R,
-                           ibb_min_body_ratio=0.50, ibb_trend_filter=False,
-                           ibb_target_mode='pivot', cost_per_trade_points=0.0):
+                           trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
     if strategy not in PIVOTCALL_STRATEGIES:
         raise ValueError(f'Unknown strategy: {strategy}')
     if trail_tiers is None:
@@ -2427,17 +2367,12 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
                 'note':'No 5m history available yet. Sync 5m history to GitHub first.'}
 
     cutoff = now_ist() - timedelta(days=days)
-    intraday = intraday[intraday.index >= cutoff].copy()
+    intraday = intraday[intraday.index >= cutoff]
     if len(intraday) == 0:
         return {'strategy':strategy,'strategyLabel':PIVOTCALL_STRATEGIES[strategy],'symbol':symbol,'trades':[],
                 'stats':_backtest_stats([]),'daysAnalyzed':0,'setupsIdentified':0,'dataSource':data_source,
                 'note':'No candles fall within the requested day range.'}
 
-    # Causal EMAs used only by optional IBB trend-filter variants.
-    # They are calculated in timestamp order and never use future candles.
-    if strategy == 'inside_bar' and ibb_trend_filter:
-        intraday['IBB_EMA20'] = intraday['Close'].ewm(span=20, adjust=False, min_periods=20).mean()
-        intraday['IBB_EMA50'] = intraday['Close'].ewm(span=50, adjust=False, min_periods=50).mean()
     daily_ohlc = _daily_ohlc_from_5m(intraday)
     virgin_map = _pc_virgin_cpr_map(intraday, daily_ohlc)
     trading_dates = sorted(set(intraday.index.date))
@@ -2468,8 +2403,7 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
         status, source, changed = resolve_global_status(global_daily, g_data_ok, d, global_store)
         store_dirty = store_dirty or changed
 
-        setup = _pc_find_setup(strategy, day, rest, first, lv, prev, prior_open_ranges, virgin_map,
-                               ibb_min_body_ratio=ibb_min_body_ratio, ibb_trend_filter=ibb_trend_filter)
+        setup = _pc_find_setup(strategy, day, rest, first, lv, prev, prior_open_ranges, virgin_map)
         if setup:
             setups += 1
             signal, entry_row, stop_pref, target_pref, reason, meta = setup
@@ -2503,9 +2437,7 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
                 stop = _pc_stop(signal, entry, entry_row, lv, stop_pref, stop_buffer)
             risk = (entry - stop) if signal == 'BUY' and stop is not None else ((stop - entry) if stop is not None else -1)
             if risk > 0:
-                if strategy == 'inside_bar' and ibb_target_mode == 'fixed_2r':
-                    target = round(entry + risk * 2.0, 2) if signal == 'BUY' else round(entry - risk * 2.0, 2)
-                elif strategy in ('gap_up_rejection', 'gap_down_rejection') and PC_GAPREJ_TARGET_MODE == 'fixed_rr':
+                if strategy in ('gap_up_rejection', 'gap_down_rejection') and PC_GAPREJ_TARGET_MODE == 'fixed_rr':
                     # Same as run_backtest(): fixed R-multiple target; trailing handled in _simulate_trade.
                     target = round(entry + risk * PC_GAPREJ_MIN_RR, 2) if signal == 'BUY' else round(entry - risk * PC_GAPREJ_MIN_RR, 2)
                 else:
@@ -2518,13 +2450,6 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
                                                status, strategy, reason, trail_tiers, extended_target_r, meta,
                                                include_entry_candle=incl_entry_candle)
                         if trade:
-                            if strategy == 'inside_bar':
-                                trade['initialStopLoss'] = round(stop, 2)
-                                trade['initialTarget'] = round(target, 2)
-                                trade['initialRisk'] = round(risk, 2)
-                                trade['ibbMinBodyRatio'] = round(float(ibb_min_body_ratio), 3)
-                                trade['ibbTrendFilter'] = bool(ibb_trend_filter)
-                                trade['ibbTargetMode'] = ibb_target_mode
                             if strategy in ('gap_up_rejection', 'gap_down_rejection'):
                                 trade['initialStopLoss'] = round(stop, 2)   # 'stopLoss'/'target' hold the final (trailed) values
                                 trade['initialTarget'] = round(target, 2)
@@ -2555,18 +2480,11 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
         'dataSource': data_source,
         'stopLossBufferPct': stop_buffer,
         'trailing': {'tiers': trail_tiers, 'extendedTargetR': extended_target_r},
-        'costModel': {'costPerTradePoints': round(max(0.0, float(cost_per_trade_points)), 4),
-                      'estimatedCostsPoints': round(len(trades) * max(0.0, float(cost_per_trade_points)), 2),
-                      'netPnlAfterCostsPoints': round(sum(t.get('pnlPoints', 0.0) for t in trades) - len(trades) * max(0.0, float(cost_per_trade_points)), 2)},
-        'strategyParameters': ({'minBreakoutBodyRatio': float(ibb_min_body_ratio),
-                                'trendFilter': bool(ibb_trend_filter), 'targetMode': ibb_target_mode}
-                               if strategy == 'inside_bar' else {}),
         'rules': {
             'source': 'PivotCall eBook — 15 Day Trading Patterns & Strategies',
             'timeframe': '5m', 'oneTradePerDayPerStrategy': True,
             'entry': 'OD/PPT (09:15 signal) enter at the next (09:20) 5m candle close; Gap Up/Down Rejection: pinpoint rejection candle at the nearest resistance/support, then entry on a LATER candle (close of the next candle, or breakdown of the rejection low / high; PC_GAPREJ_ENTRY_MODE), entry candle after 09:20; others at signal candle close',
-            'target': ('IBB target mode: ' + ibb_target_mode + (' (fixed 2R)' if strategy == 'inside_bar' and ibb_target_mode == 'fixed_2r' else ' (pivot target with existing fallback)') if strategy == 'inside_bar' else 'next suitable pivot/support/resistance when >= 2R, otherwise 2R (Gap Up/Down Rejection: fixed 2R like the main strategy)'),
-            'insideBarFilters': ({'minBreakoutBodyRatio': float(ibb_min_body_ratio), 'trendFilter': bool(ibb_trend_filter)} if strategy == 'inside_bar' else {}),
+            'target': 'next suitable pivot/support/resistance when >= 2R, otherwise 2R (Gap Up/Down Rejection: fixed 2R like the main strategy)',
             'trailing': 'TRAIL_TIERS: SL to breakeven at 1.5R, lock 0.5R at 2R, 1.5R at 3R, 3R at 4R; target extends to 10R once trailing starts',
             'subjectiveTerms': 'Big/average candle, near level, pin bar and consolidation are converted to deterministic OHLC thresholds.'
         },
@@ -2639,70 +2557,15 @@ def get_pivotcall_backtest():
             days = max(1, min(HISTORY_RETENTION_DAYS, int(request.args.get('days', HISTORY_RETENTION_DAYS))))
         except (TypeError, ValueError):
             days = HISTORY_RETENTION_DAYS
-        body_ratio = float(request.args.get('ibb_body_ratio', '0.50'))
-        body_ratio = min(0.90, max(0.50, body_ratio))
-        trend_filter = str(request.args.get('ibb_trend_filter', '0')).lower() in ('1', 'true', 'yes')
-        target_mode = str(request.args.get('ibb_target_mode', 'pivot')).lower()
-        if target_mode not in ('pivot', 'fixed_2r'):
-            target_mode = 'pivot'
-        try:
-            cost_points = max(0.0, min(1000.0, float(request.args.get('cost_per_trade_points', '0'))))
-        except (TypeError, ValueError):
-            cost_points = 0.0
         result = run_pivotcall_backtest(symbol, strategy, days=days,
                                         stop_buffer=STOP_LOSS_BUFFER_PCT,
                                         trail_tiers=TRAIL_TIERS,
-                                        extended_target_r=EXTENDED_TARGET_R,
-                                        ibb_min_body_ratio=body_ratio,
-                                        ibb_trend_filter=trend_filter,
-                                        ibb_target_mode=target_mode,
-                                        cost_per_trade_points=cost_points)
+                                        extended_target_r=EXTENDED_TARGET_R)
         result['timestamp'] = now_ist().isoformat()
         return jsonify(result)
     except Exception as e:
         logger.exception("PivotCall setup backtest handler exception")
         return jsonify({'error':'Setup backtest failed','details':str(e)}), 500
-
-@app.route('/api/backtest/inside-bar/diagnostic', methods=['GET'])
-def inside_bar_diagnostic():
-    """Compare fixed IBB variants on the same requested history; this is research, not optimization."""
-    try:
-        symbol = _resolve_symbols_param(request.args.get('symbol', 'nifty'))[0]
-        try:
-            days = max(1, min(HISTORY_RETENTION_DAYS, int(request.args.get('days', HISTORY_RETENTION_DAYS))))
-        except (TypeError, ValueError):
-            days = HISTORY_RETENTION_DAYS
-        try:
-            cost_points = max(0.0, min(1000.0, float(request.args.get('cost_per_trade_points', '0'))))
-        except (TypeError, ValueError):
-            cost_points = 0.0
-        variants = [
-            {'key':'baseline', 'label':'Baseline: body > 50%, pivot target', 'body':0.50, 'trend':False, 'target':'pivot'},
-            {'key':'strong_body', 'label':'Stronger breakout: body > 60%, pivot target', 'body':0.60, 'trend':False, 'target':'pivot'},
-            {'key':'trend_filter', 'label':'EMA20/EMA50 trend filter, body > 50%', 'body':0.50, 'trend':True, 'target':'pivot'},
-            {'key':'trend_fixed_2r', 'label':'EMA trend + fixed 2R target, body > 50%', 'body':0.50, 'trend':True, 'target':'fixed_2r'},
-        ]
-        results = []
-        for variant in variants:
-            result = run_pivotcall_backtest(symbol, 'inside_bar', days=days,
-                stop_buffer=STOP_LOSS_BUFFER_PCT, trail_tiers=TRAIL_TIERS,
-                extended_target_r=EXTENDED_TARGET_R,
-                ibb_min_body_ratio=variant['body'], ibb_trend_filter=variant['trend'],
-                ibb_target_mode=variant['target'], cost_per_trade_points=cost_points)
-            stats = result.get('stats', {})
-            results.append({'key':variant['key'], 'label':variant['label'],
-                'parameters':{'minBreakoutBodyRatio':variant['body'], 'trendFilter':variant['trend'], 'targetMode':variant['target']},
-                'dataSource':result.get('dataSource'), 'daysAnalyzed':result.get('daysAnalyzed'),
-                'historyRange':result.get('historyRange'), 'stats':stats,
-                'estimatedCostsPoints':result.get('costModel',{}).get('estimatedCostsPoints',0),
-                'netPnlAfterCostsPoints':result.get('costModel',{}).get('netPnlAfterCostsPoints',stats.get('totalPnlPoints',0))})
-        return jsonify({'strategy':'inside_bar','symbol':symbol,'timeframe':'5m','daysRequested':days,
-            'costPerTradePoints':cost_points,'variants':results,
-            'note':'Compare variants on the same period, then validate the selected rule on an unseen out-of-sample period. No variant is automatically selected.'})
-    except Exception as e:
-        logger.exception('Inside bar diagnostic backtest failed')
-        return jsonify({'error':'Inside bar diagnostic failed','details':str(e)}), 500
-
 
 @app.route('/api/backtest', methods=['GET'])
 def get_backtest():
