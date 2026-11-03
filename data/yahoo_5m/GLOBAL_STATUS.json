@@ -1546,6 +1546,27 @@
     "status": "bullish",
     "total": 10
   },
+  "2026-10-29": {
+    "frozenAt": "2026-11-03T09:35:07.147512+05:30",
+    "positive": 4,
+    "source": "auto",
+    "status": "neutral",
+    "total": 10
+  },
+  "2026-10-30": {
+    "frozenAt": "2026-11-03T09:35:07.239831+05:30",
+    "positive": 2,
+    "source": "auto",
+    "status": "bearish",
+    "total": 10
+  },
+  "2026-11-02": {
+    "frozenAt": "2026-11-03T09:35:07.248397+05:30",
+    "positive": 5,
+    "source": "auto",
+    "status": "neutral",
+    "total": 10
+  },
   "2026-11-03": {
     "capturedAt": "2026-11-03T09:31:42.539956+05:30",
     "indices": [
