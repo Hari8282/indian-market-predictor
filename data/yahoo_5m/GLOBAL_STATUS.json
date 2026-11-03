@@ -1545,5 +1545,96 @@
     "source": "auto",
     "status": "bullish",
     "total": 10
+  },
+  "2026-11-03": {
+    "capturedAt": "2026-11-03T09:31:42.539956+05:30",
+    "indices": [
+      {
+        "barDate": "2026-11-03",
+        "changePct": -0.0,
+        "close": 63081.86,
+        "name": "Nikkei 225",
+        "prevClose": 63082.27,
+        "symbol": "^N225"
+      },
+      {
+        "barDate": "2026-11-03",
+        "changePct": 0.56,
+        "close": 23523.35,
+        "name": "Hang Seng",
+        "prevClose": 23393.32,
+        "symbol": "^HSI"
+      },
+      {
+        "barDate": "2026-11-03",
+        "changePct": -0.56,
+        "close": 3612.09,
+        "name": "Shanghai Composite",
+        "prevClose": 3632.31,
+        "symbol": "000001.SS"
+      },
+      {
+        "barDate": "2026-11-03",
+        "changePct": -3.97,
+        "close": 5657.39,
+        "name": "KOSPI",
+        "prevClose": 5891.54,
+        "symbol": "^KS11"
+      },
+      {
+        "barDate": "2026-11-03",
+        "changePct": 0.23,
+        "close": 10761.3,
+        "name": "FTSE 100",
+        "prevClose": 10736.14,
+        "symbol": "^FTSE"
+      },
+      {
+        "barDate": "2026-11-03",
+        "changePct": 0.63,
+        "close": 25981.09,
+        "name": "DAX",
+        "prevClose": 25817.48,
+        "symbol": "^GDAXI"
+      },
+      {
+        "barDate": "2026-11-03",
+        "changePct": 1.07,
+        "close": 8047.69,
+        "name": "CAC 40",
+        "prevClose": 7962.11,
+        "symbol": "^FCHI"
+      },
+      {
+        "barDate": "2026-11-03",
+        "changePct": -0.52,
+        "close": 7541.4,
+        "name": "S&P 500",
+        "prevClose": 7580.95,
+        "symbol": "^GSPC"
+      },
+      {
+        "barDate": "2026-11-03",
+        "changePct": -1.09,
+        "close": 25164.36,
+        "name": "NASDAQ",
+        "prevClose": 25440.68,
+        "symbol": "^IXIC"
+      },
+      {
+        "barDate": "2026-11-03",
+        "changePct": 0.41,
+        "close": 51983.98,
+        "name": "Dow Jones",
+        "prevClose": 51774.18,
+        "symbol": "^DJI"
+      }
+    ],
+    "indicesFailed": [],
+    "late": true,
+    "positive": 5,
+    "source": "morning_snapshot_0915",
+    "status": "neutral",
+    "total": 10
   }
 }
