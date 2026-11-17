@@ -1854,6 +1854,20 @@
     "status": "neutral",
     "total": 10
   },
+  "2026-11-11": {
+    "frozenAt": "2026-11-17T05:49:01.183743+05:30",
+    "positive": 6,
+    "source": "auto",
+    "status": "neutral",
+    "total": 10
+  },
+  "2026-11-12": {
+    "frozenAt": "2026-11-17T05:49:01.273590+05:30",
+    "positive": 4,
+    "source": "auto",
+    "status": "neutral",
+    "total": 10
+  },
   "2026-11-13": {
     "capturedAt": "2026-11-13T12:05:27.871443+05:30",
     "indices": [
@@ -1943,6 +1957,13 @@
     "positive": 4,
     "source": "morning_snapshot_0915",
     "status": "neutral",
+    "total": 10
+  },
+  "2026-11-16": {
+    "frozenAt": "2026-11-17T05:49:01.279331+05:30",
+    "positive": 2,
+    "source": "auto",
+    "status": "bearish",
     "total": 10
   }
 }
