@@ -2057,6 +2057,13 @@
     "status": "bearish",
     "total": 10
   },
+  "2026-11-18": {
+    "frozenAt": "2026-11-20T21:46:38.337451+05:30",
+    "positive": 3,
+    "source": "auto",
+    "status": "bearish",
+    "total": 10
+  },
   "2026-11-19": {
     "capturedAt": "2026-11-19T10:36:16.122529+05:30",
     "indices": [
