@@ -117,7 +117,20 @@ GITHUB_TOKEN = _clean_env("GITHUB_TOKEN", default=None) or None
 GITHUB_REPO = _clean_env("GITHUB_REPO", default=None) or None
 GITHUB_BRANCH = _clean_env("GITHUB_BRANCH", default="main")
 GITHUB_DATA_DIR = _clean_env("GITHUB_DATA_DIR", default="market_data")
-HISTORY_RETENTION_DAYS = 100
+try:
+    HISTORY_RETENTION_DAYS = max(60, int(os.environ.get('HISTORY_RETENTION_DAYS', '365')))
+except (TypeError, ValueError):
+    HISTORY_RETENTION_DAYS = 365   # archive keeps up to a year of 5m candles (grows with every sync)
+
+def parse_backtest_days(raw):
+    """Return number of days to test, or None for 'max' (use every archived candle)."""
+    v = str(raw if raw is not None else 'max').strip().lower()
+    if v in ('max', 'all', '0', ''):
+        return None
+    try:
+        return max(1, min(HISTORY_RETENTION_DAYS, int(v)))
+    except (TypeError, ValueError):
+        return None
 HISTORY_SYMBOLS = {'^NSEI': 'NIFTY', '^NSEBANK': 'BANKNIFTY', '^BSESN': 'SENSEX'}
 
 def github_configured():
@@ -631,7 +644,7 @@ def _choose_stop_loss(signal, entry, entry_row, bc, tc, buffer_pct=STOP_LOSS_BUF
         valid = [c for c in candidates if c > entry]
         return min(valid) if valid else None
 
-def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=STOP_LOSS_BUFFER_PCT,
+def run_backtest(symbol, days=None, min_rr=2.0, entry_fraction=None, stop_buffer=STOP_LOSS_BUFFER_PCT,
                  trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
     if trail_tiers is None:
         trail_tiers = TRAIL_TIERS
@@ -648,8 +661,9 @@ def run_backtest(symbol, days=100, min_rr=2.0, entry_fraction=None, stop_buffer=
             "note": "No 5m history available yet."
         }
 
-    cutoff = now_ist() - timedelta(days=days)
-    intraday = intraday[intraday.index >= cutoff]
+    if days is not None:                       # days=None -> MAX: test the entire archive
+        cutoff = now_ist() - timedelta(days=days)
+        intraday = intraday[intraday.index >= cutoff]
     if len(intraday) == 0:
         return {
             "symbol": symbol, "trades": [], "stats": _backtest_stats([]),
@@ -1901,17 +1915,18 @@ PC_GAPREJ_FIRST_CANDLE_CPR = 'close'    # 'close' | 'body' | 'full' | 'off'
 PC_GAPREJ_TARGET_MODE = 'fixed_rr'      # 'fixed_rr' | 'pivot' (Gap Up settings)
 PC_GAPREJ_MIN_RR = 2.5                  # Gap Up: fixed 2.5R initial target
 
-# Gap Down Rejection has its OWN settings so the Gap Up strategy and all other
-# strategies retain their original behaviour. These are cautious candidate
-# settings from the earlier exploratory tuning; validate on unseen data before live use.
-PC_GAPDOWN_ENTRY_MODE = 'close'          # confirm on the next candle close
-PC_GAPDOWN_STOP_MODE = 'candle'          # stop beyond the bullish rejection candle low
-PC_GAPDOWN_APPROACH_PCT = 0.0003         # within 0.03% of S1 / S2 / PDL
-PC_GAPDOWN_PIERCE_PCT = 0.0010           # permit at most 0.10% wick pierce
-PC_GAPDOWN_EARLIEST_HHMM = (9, 20)       # entry candle must start after 09:20
-PC_GAPDOWN_LAST_SIGNAL_HHMM = (10, 0)    # avoid later, noisier entries
-PC_GAPDOWN_FIRST_CANDLE_CPR = 'off'      # do not require first candle below CPR
-PC_GAPDOWN_TARGET_RR = 1.5               # initial target 1.5R; existing trailing tiers remain
+# Gap Down Rejection is an EXACT MIRROR of Gap Up Rejection: it reuses every PC_GAPREJ_* setting
+# (entry mode, stop anchor, approach/pierce %, 09:20 earliest / 11:00 latest entry, first-candle-vs-CPR
+# test, 2.5R fixed initial target) with support levels / bullish candles instead of resistance / bearish.
+# The PC_GAPDOWN_* names are kept as aliases so any existing reference keeps working.
+PC_GAPDOWN_ENTRY_MODE = PC_GAPREJ_ENTRY_MODE
+PC_GAPDOWN_STOP_MODE = PC_GAPREJ_STOP_MODE
+PC_GAPDOWN_APPROACH_PCT = PC_GAPREJ_APPROACH_PCT
+PC_GAPDOWN_PIERCE_PCT = PC_GAPREJ_PIERCE_PCT
+PC_GAPDOWN_EARLIEST_HHMM = PC_GAPREJ_EARLIEST_HHMM
+PC_GAPDOWN_LAST_SIGNAL_HHMM = PC_GAPREJ_LAST_SIGNAL_HHMM
+PC_GAPDOWN_FIRST_CANDLE_CPR = PC_GAPREJ_FIRST_CANDLE_CPR
+PC_GAPDOWN_TARGET_RR = PC_GAPREJ_MIN_RR
 
 
 def _pc_float(v):
@@ -2083,22 +2098,13 @@ def _pc_gap_rejection(side, day, levels, gap, f):
     """
     sell = (side == 'SELL')
     cpr_low, cpr_high = levels['CPR_LOW'], levels['CPR_HIGH']
-    # Select side-specific configuration. The Gap Down values are deliberately
-    # independent; no shared Gap Up or general strategy constants are changed.
-    if sell:
-        entry_mode = PC_GAPREJ_ENTRY_MODE
-        stop_mode = PC_GAPREJ_STOP_MODE
-        approach_pct = PC_GAPREJ_APPROACH_PCT
-        pierce_pct = PC_GAPREJ_PIERCE_PCT
-        earliest, latest = PC_GAPREJ_EARLIEST_HHMM, PC_GAPREJ_LAST_SIGNAL_HHMM
-        cpr_mode = PC_GAPREJ_FIRST_CANDLE_CPR
-    else:
-        entry_mode = PC_GAPDOWN_ENTRY_MODE
-        stop_mode = PC_GAPDOWN_STOP_MODE
-        approach_pct = PC_GAPDOWN_APPROACH_PCT
-        pierce_pct = PC_GAPDOWN_PIERCE_PCT
-        earliest, latest = PC_GAPDOWN_EARLIEST_HHMM, PC_GAPDOWN_LAST_SIGNAL_HHMM
-        cpr_mode = PC_GAPDOWN_FIRST_CANDLE_CPR
+    # Both sides share the same configuration (Gap Down is the mirror of Gap Up).
+    entry_mode = PC_GAPREJ_ENTRY_MODE
+    stop_mode = PC_GAPREJ_STOP_MODE
+    approach_pct = PC_GAPREJ_APPROACH_PCT
+    pierce_pct = PC_GAPREJ_PIERCE_PCT
+    earliest, latest = PC_GAPREJ_EARLIEST_HHMM, PC_GAPREJ_LAST_SIGNAL_HHMM
+    cpr_mode = PC_GAPREJ_FIRST_CANDLE_CPR
     if sell:
         gap_pct = ((gap['open'] - gap['prevClose']) / gap['prevClose'] * 100.0) if gap['prevClose'] else 0.0
         gap_ok = gap['gapUp'] or gap_pct >= PC_GAP_MIN_PCT
@@ -2182,7 +2188,7 @@ def _pc_gap_rejection(side, day, levels, gap, f):
                 'cprHigh' if sell else 'cprLow': round(cpr_high if sell else cpr_low, 2),
                 'firstCandleAboveCPR' if sell else 'firstCandleBelowCPR': True,
                 'stopAnchor': anchor, 'entryMode': entry_mode,
-                'strategyTuning': ('gap_down_finetuned' if not sell else 'gap_up_existing')}
+                'strategyTuning': ('gap_down_mirror_of_gap_up' if not sell else 'gap_up_existing')}
 
         # ---- Step 2: entry candle AFTER the rejection candle ----
         window = PC_GAPREJ_BREAKDOWN_WINDOW if entry_mode == 'breakdown' else 1
@@ -2377,7 +2383,7 @@ def _pc_find_setup(strategy, day, rest, first, levels, prev, prior_open_ranges, 
     return None
 
 
-def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUFFER_PCT,
+def run_pivotcall_backtest(symbol, strategy, days=None, stop_buffer=STOP_LOSS_BUFFER_PCT,
                            trail_tiers=None, extended_target_r=EXTENDED_TARGET_R):
     if strategy not in PIVOTCALL_STRATEGIES:
         raise ValueError(f'Unknown strategy: {strategy}')
@@ -2394,8 +2400,9 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
                 'stats':_backtest_stats([]),'daysAnalyzed':0,'setupsIdentified':0,'dataSource':'unavailable',
                 'note':'No 5m history available yet. Sync 5m history to GitHub first.'}
 
-    cutoff = now_ist() - timedelta(days=days)
-    intraday = intraday[intraday.index >= cutoff]
+    if days is not None:                       # days=None -> MAX: test the entire archive
+        cutoff = now_ist() - timedelta(days=days)
+        intraday = intraday[intraday.index >= cutoff]
     if len(intraday) == 0:
         return {'strategy':strategy,'strategyLabel':PIVOTCALL_STRATEGIES[strategy],'symbol':symbol,'trades':[],
                 'stats':_backtest_stats([]),'daysAnalyzed':0,'setupsIdentified':0,'dataSource':data_source,
@@ -2466,8 +2473,8 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
             risk = (entry - stop) if signal == 'BUY' and stop is not None else ((stop - entry) if stop is not None else -1)
             if risk > 0:
                 if strategy in ('gap_up_rejection', 'gap_down_rejection') and PC_GAPREJ_TARGET_MODE == 'fixed_rr':
-                    # Separate initial target R for Gap Down; Gap Up remains at its existing 2.5R.
-                    target_rr = PC_GAPDOWN_TARGET_RR if strategy == 'gap_down_rejection' else PC_GAPREJ_MIN_RR
+                    # Same fixed-R initial target for both sides (mirror); trailing tiers then apply.
+                    target_rr = PC_GAPREJ_MIN_RR
                     target = round(entry + risk * target_rr, 2) if signal == 'BUY' else round(entry - risk * target_rr, 2)
                 else:
                     target = _pc_target(signal, entry, risk, lv, target_pref)
@@ -2513,16 +2520,18 @@ def run_pivotcall_backtest(symbol, strategy, days=100, stop_buffer=STOP_LOSS_BUF
             'source': 'PivotCall eBook — 15 Day Trading Patterns & Strategies',
             'timeframe': '5m', 'oneTradePerDayPerStrategy': True,
             'entry': 'OD/PPT (09:15 signal) enter at the next (09:20) 5m candle close; Gap Up/Down Rejection: pinpoint rejection candle at the nearest resistance/support, then entry on a LATER candle (close of the next candle, or breakdown of the rejection low / high; PC_GAPREJ_ENTRY_MODE), entry candle after 09:20; others at signal candle close',
-            'target': ('Gap Down Rejection: fixed 1.5R initial target; Gap Up Rejection: existing fixed 2.5R; other strategies retain their existing pivot/target rules.'),
-            'gapDownRejectionTuning': {'entryMode': PC_GAPDOWN_ENTRY_MODE, 'entryCutoff': '10:00 IST',
-                                       'firstCandleCprFilter': PC_GAPDOWN_FIRST_CANDLE_CPR,
-                                       'stopAnchor': PC_GAPDOWN_STOP_MODE, 'initialTargetR': PC_GAPDOWN_TARGET_RR,
-                                       'approachPct': PC_GAPDOWN_APPROACH_PCT * 100,
-                                       'maxPiercePct': PC_GAPDOWN_PIERCE_PCT * 100},
+            'target': ('Gap Up & Gap Down Rejection: identical fixed %sR initial target (Gap Down is the exact mirror of Gap Up); other strategies retain their existing pivot/target rules.' % PC_GAPREJ_MIN_RR),
+            'gapRejectionSettings': {'entryMode': PC_GAPREJ_ENTRY_MODE,
+                                     'entryWindow': '%02d:%02d-%02d:%02d IST' % (PC_GAPREJ_EARLIEST_HHMM + PC_GAPREJ_LAST_SIGNAL_HHMM),
+                                     'firstCandleCprFilter': PC_GAPREJ_FIRST_CANDLE_CPR,
+                                     'stopAnchor': PC_GAPREJ_STOP_MODE, 'initialTargetR': PC_GAPREJ_MIN_RR,
+                                     'approachPct': PC_GAPREJ_APPROACH_PCT * 100,
+                                     'maxPiercePct': PC_GAPREJ_PIERCE_PCT * 100},
             'trailing': 'TRAIL_TIERS: SL to breakeven at 1.5R, lock 0.5R at 2R, 1.5R at 3R, 3R at 4R; target extends to 10R once trailing starts',
             'subjectiveTerms': 'Big/average candle, near level, pin bar and consolidation are converted to deterministic OHLC thresholds.'
         },
-        'historyRange': {'from': intraday.index[0].strftime('%Y-%m-%d'), 'to': intraday.index[-1].strftime('%Y-%m-%d')}
+        'historyRange': {'from': intraday.index[0].strftime('%Y-%m-%d'), 'to': intraday.index[-1].strftime('%Y-%m-%d')},
+        'requestedDays': ('max' if days is None else days)
     }
 
 
@@ -2587,10 +2596,7 @@ def get_pivotcall_backtest():
     try:
         symbol = _resolve_symbols_param(request.args.get('symbol', 'nifty'))[0]
         strategy = str(request.args.get('strategy', 'od')).strip().lower()
-        try:
-            days = max(1, min(HISTORY_RETENTION_DAYS, int(request.args.get('days', HISTORY_RETENTION_DAYS))))
-        except (TypeError, ValueError):
-            days = HISTORY_RETENTION_DAYS
+        days = parse_backtest_days(request.args.get('days', 'max'))
         result = run_pivotcall_backtest(symbol, strategy, days=days,
                                         stop_buffer=STOP_LOSS_BUFFER_PCT,
                                         trail_tiers=TRAIL_TIERS,
@@ -2605,10 +2611,7 @@ def get_pivotcall_backtest():
 def get_backtest():
     try:
         symbol = _resolve_symbols_param(request.args.get('symbol', 'nifty'))[0]
-        try:
-            days = max(1, min(HISTORY_RETENTION_DAYS, int(request.args.get('days', HISTORY_RETENTION_DAYS))))
-        except (TypeError, ValueError):
-            days = HISTORY_RETENTION_DAYS
+        days = parse_backtest_days(request.args.get('days', 'max'))
 
         result = run_backtest(symbol, days=days, stop_buffer=STOP_LOSS_BUFFER_PCT,
                               trail_tiers=TRAIL_TIERS, extended_target_r=EXTENDED_TARGET_R)
