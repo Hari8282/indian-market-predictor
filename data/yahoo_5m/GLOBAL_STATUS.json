@@ -2155,6 +2155,20 @@
     "status": "bearish",
     "total": 10
   },
+  "2026-11-20": {
+    "frozenAt": "2026-11-24T11:08:58.641610+05:30",
+    "positive": 0,
+    "source": "auto",
+    "status": "bearish",
+    "total": 10
+  },
+  "2026-11-23": {
+    "frozenAt": "2026-11-24T11:08:58.644572+05:30",
+    "positive": 9,
+    "source": "auto",
+    "status": "bullish",
+    "total": 10
+  },
   "2026-11-24": {
     "capturedAt": "2026-11-24T11:06:32.747080+05:30",
     "indices": [
