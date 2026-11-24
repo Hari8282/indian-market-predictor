@@ -1929,6 +1929,26 @@ PC_GAPDOWN_FIRST_CANDLE_CPR = PC_GAPREJ_FIRST_CANDLE_CPR
 PC_GAPDOWN_TARGET_RR = PC_GAPREJ_MIN_RR
 
 
+# ---- CPRBO (CPR Breakout) — tuned for win-rate on 66 sessions of BANKNIFTY 5m data ----------
+# Original rule (breakout after 2 CPR-touching candles, stop at candle/CPR, pivot target >= 2R)
+# won ~36-43% on the sample. Filters below were chosen by a randomized search over ~7,700
+# parameter sets and kept only where the effect was consistent across the sample.
+PC_CPRBO_MIN_INSIDE = 2          # candles that must have touched the CPR before the breakout candle
+PC_CPRBO_EARLIEST_HHMM = (9, 20) # breakout candle may start from 09:20 (entry = its close)
+PC_CPRBO_LATEST_HHMM = (11, 0)   # no breakout entries after 11:00 IST (late breakouts chop out)
+PC_CPRBO_FIRST_CANDLE_FILTER = True  # BUY: 09:15 candle must NOT close below CPR low; SELL: not above CPR high
+PC_CPRBO_DIRECTIONAL_CANDLE = True   # breakout candle must be green for BUY / red for SELL
+PC_CPRBO_MIN_BEYOND_PCT = 0.05   # breakout candle must close >= 0.05% beyond the CPR edge (no marginal pokes)
+PC_CPRBO_MAX_CPR_WIDTH_PCT = None  # e.g. 0.30 -> only narrow-CPR days (raises win rate, cuts trades ~30%)
+PC_CPRBO_STOP_BUFFER_PCT = 0.10  # buffer beyond the stop anchor
+PC_CPRBO_MIN_RISK_PCT = 0.07     # stop is widened to at least 0.07% of entry (kills 4-10 pt noise stops)
+PC_CPRBO_ROOM_R = 0.0            # >0: skip if next pivot (R1/S1) is closer than this many R (optional, off)
+# Stop anchor = opposite extreme of the 09:15 candle (low for BUY / high for SELL): if price re-enters
+# the opening range the breakout has failed. Target is a fixed R-multiple; existing trailing tiers still
+# apply, but at 0.75R the target is normally hit before the first tier (1.5R) can trigger.
+PC_CPRBO_TARGET_RR = 0.75
+
+
 def _pc_float(v):
     try:
         v = float(v)
@@ -2346,17 +2366,58 @@ def _pc_find_setup(strategy, day, rest, first, levels, prev, prior_open_ranges, 
                         row = day.iloc[k]
                         return ('BUY', row, l0, levels['R1'], 'W reversal: trapped shorts retested reversal low', {'reversalLow':round(l0,2)})
 
-    # 13) CPRBO — breakout after price has spent time inside/at CPR; avoid immediate resistance.
-    if strategy == 'cprbo' and len(rest) >= 2:
-        inside_count = 0
-        for p, (_, row) in enumerate(rest.iterrows()):
-            hi, lo, close = float(row['High']), float(row['Low']), float(row['Close'])
+    # 13) CPRBO — CPR breakout; see PC_CPRBO_* settings (win-rate tuned).
+    if strategy == 'cprbo':
+        pp = levels['PP']
+        width_pct = abs(tc - bc) / pp * 100.0 if pp else 0.0
+        if PC_CPRBO_MAX_CPR_WIDTH_PCT is not None and width_pct > PC_CPRBO_MAX_CPR_WIDTH_PCT:
+            return None
+        inside = 0
+        for k in range(len(day) - 1):
+            row = day.iloc[k]
+            hi, lo = float(row['High']), float(row['Low'])
+            op, cl_ = float(row['Open']), float(row['Close'])
             if lo <= cpr_high and hi >= cpr_low:
-                inside_count += 1
-            if inside_count >= 2 and close > cpr_high:
-                return result('BUY', p, cpr_low, levels['R1'], 'CPRBO: bullish breakout after CPR consolidation', {'cprWidthPct':abs(tc-bc)/levels['PP']*100 if levels['PP'] else 0})
-            if inside_count >= 2 and close < cpr_low:
-                return result('SELL', p, cpr_high, levels['S1'], 'CPRBO: bearish breakout after CPR consolidation', {'cprWidthPct':abs(tc-bc)/levels['PP']*100 if levels['PP'] else 0})
+                inside += 1
+            if k == 0 or inside < PC_CPRBO_MIN_INSIDE:
+                continue
+            sig = 'BUY' if cl_ > cpr_high else ('SELL' if cl_ < cpr_low else None)
+            if sig is None:
+                continue
+            ts = day.index[k]
+            hhmm = (ts.hour, ts.minute)
+            if hhmm > PC_CPRBO_LATEST_HHMM:
+                return None
+            if hhmm < PC_CPRBO_EARLIEST_HHMM:
+                continue
+            buy = (sig == 'BUY')
+            if PC_CPRBO_DIRECTIONAL_CANDLE and ((buy and cl_ <= op) or (not buy and cl_ >= op)):
+                continue
+            edge = cpr_high if buy else cpr_low
+            if abs(cl_ - edge) / cl_ * 100.0 < PC_CPRBO_MIN_BEYOND_PCT:
+                continue
+            if PC_CPRBO_FIRST_CANDLE_FILTER:
+                if (buy and f['close'] < cpr_low) or (not buy and f['close'] > cpr_high):
+                    continue
+            entry = cl_
+            anchor = f['low'] if buy else f['high']
+            stop = anchor * (1 - PC_CPRBO_STOP_BUFFER_PCT / 100.0) if buy else anchor * (1 + PC_CPRBO_STOP_BUFFER_PCT / 100.0)
+            min_risk = entry * PC_CPRBO_MIN_RISK_PCT / 100.0
+            if (entry - stop if buy else stop - entry) < min_risk:
+                stop = entry - min_risk if buy else entry + min_risk
+            risk = abs(entry - stop)
+            if PC_CPRBO_ROOM_R > 0:
+                nxt = levels['R1'] if buy else levels['S1']
+                gap_to = (nxt - entry) if buy else (entry - nxt)
+                if 0 < gap_to < PC_CPRBO_ROOM_R * risk:
+                    continue
+            meta = {'cprWidthPct': round(width_pct, 3), 'cprCandlesTouched': inside,
+                    'stopPrice': stop, 'targetRR': PC_CPRBO_TARGET_RR, 'entryPrice': entry,
+                    'stopAnchorName': '09:15 candle ' + ('low' if buy else 'high')}
+            return (sig, row, None, None,
+                    'CPRBO: %s breakout of CPR after %d CPR-touching candles (first candle not against, stop beyond opening range)'
+                    % ('bullish' if buy else 'bearish', inside), meta)
+        return None
 
     # 14) RCBO — first red candle high breakout; avoid breakout directly into CPR.
     if strategy == 'rcbo' and first_red and f['range'] > 0:
@@ -2445,6 +2506,8 @@ def run_pivotcall_backtest(symbol, strategy, days=None, stop_buffer=STOP_LOSS_BU
             meta = dict(meta)
             entry_override = meta.pop('entryPrice', None)       # strategy-defined entry price
             stop_anchor = meta.pop('stopAnchor', None)          # strategy-defined SL anchor (+buffer)
+            stop_price = meta.pop('stopPrice', None)            # strategy-defined FINAL stop price
+            target_rr_override = meta.pop('targetRR', None)     # strategy-defined fixed-R target
             incl_entry_candle = bool(meta.pop('includeEntryCandle', False))
             signal_row = entry_row                      # candle that produced the signal
             entry_time = entry_row.name
@@ -2459,7 +2522,11 @@ def run_pivotcall_backtest(symbol, strategy, days=None, stop_buffer=STOP_LOSS_BU
                 next_close_entry = True
             # Stop-loss: anchored to the ENTRY candle's low/high (+buffer) and the
             # strategy's preferred level, validated against the entry price.
-            if stop_anchor is not None:
+            if stop_price is not None:
+                stop = float(stop_price)
+                if (signal == 'BUY' and stop >= entry) or (signal == 'SELL' and stop <= entry):
+                    stop = None
+            elif stop_anchor is not None:
                 if signal == 'SELL':      # SL above rejection high / pivot level (+ buffer %)
                     stop = float(stop_anchor) * (1 + stop_buffer / 100.0)
                     if stop <= entry:
@@ -2476,6 +2543,8 @@ def run_pivotcall_backtest(symbol, strategy, days=None, stop_buffer=STOP_LOSS_BU
                     # Same fixed-R initial target for both sides (mirror); trailing tiers then apply.
                     target_rr = PC_GAPREJ_MIN_RR
                     target = round(entry + risk * target_rr, 2) if signal == 'BUY' else round(entry - risk * target_rr, 2)
+                elif target_rr_override is not None:
+                    target = round(entry + risk * target_rr_override, 2) if signal == 'BUY' else round(entry - risk * target_rr_override, 2)
                 else:
                     target = _pc_target(signal, entry, risk, lv, target_pref)
                 if target is not None:
@@ -2486,7 +2555,7 @@ def run_pivotcall_backtest(symbol, strategy, days=None, stop_buffer=STOP_LOSS_BU
                                                status, strategy, reason, trail_tiers, extended_target_r, meta,
                                                include_entry_candle=incl_entry_candle)
                         if trade:
-                            if strategy in ('gap_up_rejection', 'gap_down_rejection'):
+                            if strategy in ('gap_up_rejection', 'gap_down_rejection', 'cprbo'):
                                 trade['initialStopLoss'] = round(stop, 2)   # 'stopLoss'/'target' hold the final (trailed) values
                                 trade['initialTarget'] = round(target, 2)
                                 trade['initialRisk'] = round(risk, 2)
@@ -2527,6 +2596,10 @@ def run_pivotcall_backtest(symbol, strategy, days=None, stop_buffer=STOP_LOSS_BU
                                      'stopAnchor': PC_GAPREJ_STOP_MODE, 'initialTargetR': PC_GAPREJ_MIN_RR,
                                      'approachPct': PC_GAPREJ_APPROACH_PCT * 100,
                                      'maxPiercePct': PC_GAPREJ_PIERCE_PCT * 100},
+            'cprbo': {'minCprCandlesTouched': PC_CPRBO_MIN_INSIDE, 'entryWindow': '09:20-11:00 IST', 'firstCandleNotAgainst': PC_CPRBO_FIRST_CANDLE_FILTER,
+                      'directionalCandle': PC_CPRBO_DIRECTIONAL_CANDLE, 'minCloseBeyondCprPct': PC_CPRBO_MIN_BEYOND_PCT,
+                      'stop': '09:15 candle opposite extreme +%s%% buffer, min risk %s%% of entry' % (PC_CPRBO_STOP_BUFFER_PCT, PC_CPRBO_MIN_RISK_PCT),
+                      'targetR': PC_CPRBO_TARGET_RR, 'maxCprWidthPct': PC_CPRBO_MAX_CPR_WIDTH_PCT},
             'trailing': 'TRAIL_TIERS: SL to breakeven at 1.5R, lock 0.5R at 2R, 1.5R at 3R, 3R at 4R; target extends to 10R once trailing starts',
             'subjectiveTerms': 'Big/average candle, near level, pin bar and consolidation are converted to deterministic OHLC thresholds.'
         },
