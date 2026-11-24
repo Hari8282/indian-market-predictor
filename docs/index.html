@@ -1177,7 +1177,7 @@ function updateBacktestStrategyHelp() {
         gap_down_rejection:'Gap Down Rejection (mirror of Gap Up): gap-down, first candle below CPR, bullish rejection at S1/S2/PDL, BUY on next candle close; 2.5R target with the same trailing SL tiers.',
         m_reversal:'M Reversal: failed upside trend, trapped longs, then retest of the reversal high.',
         w_reversal:'W Reversal: failed downside trend, trapped shorts, then retest of the reversal low.',
-        cprbo:'CPRBO: CPR consolidation followed by a bullish or bearish CPR breakout.',
+        cprbo:'CPRBO (win-rate tuned): 2+ candles touch the CPR, then a strong directional candle closes ≥0.05% beyond it between 09:20–11:00, 09:15 candle not against the move; SL beyond the 09:15 candle extreme, 0.75R target.',
         rcbo:'RCBO: first red candle high breakout; CPR resistance is avoided; large entry candles may use PDH as structural stop.',
         gcbo:'GCBO: first green candle low breakdown; CPR support is avoided; large entry candles may use structural pivot support.'
     };
