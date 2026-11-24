@@ -1019,7 +1019,10 @@
                     <select id="backtestDays" style="background:rgba(255,255,255,0.06);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:7px 10px;font-size:12px;">
                         <option value="30">Last 30 days</option>
                         <option value="60">Last 60 days</option>
-                        <option value="100" selected>Last 100 days</option>
+                        <option value="100">Last 100 days</option>
+                        <option value="180">Last 180 days</option>
+                        <option value="365">Last 365 days</option>
+                        <option value="max" selected>Maximum available</option>
                     </select>
                     <button class="journal-refresh-btn" onclick="runBacktest()">Run Backtest</button>
                 </div>
@@ -1170,8 +1173,8 @@ function updateBacktestStrategyHelp() {
         virgin_cpr:'Virgin CPR Reversal: confirmation candle at a recent prior virgin CPR.',
         rcr:'RCR: retracement to the high of a big/average first red candle with bearish confirmation.',
         gcr:'GCR: retracement to the low of a big/average first green candle with bullish confirmation.',
-        gap_up_rejection:'Gap Up Rejection: bearish gap-up candle with overhead pivot/resistance; target is the gap/2R.',
-        gap_down_rejection:'Gap Down Rejection: wait for the gap to fill, then trade the bullish breakout above PDL.',
+        gap_up_rejection:'Gap Up Rejection: gap-up, first candle above CPR, bearish rejection at R1/R2/PDH, SELL on next candle close; 2.5R target with trailing SL tiers.',
+        gap_down_rejection:'Gap Down Rejection (mirror of Gap Up): gap-down, first candle below CPR, bullish rejection at S1/S2/PDL, BUY on next candle close; 2.5R target with the same trailing SL tiers.',
         m_reversal:'M Reversal: failed upside trend, trapped longs, then retest of the reversal high.',
         w_reversal:'W Reversal: failed downside trend, trapped shorts, then retest of the reversal low.',
         cprbo:'CPRBO: CPR consolidation followed by a bullish or bearish CPR breakout.',
@@ -1576,7 +1579,7 @@ function setConnection(connected, message) {
         async function runBacktest() {
             const strategy = document.getElementById('backtestStrategy')?.value || 'existing';
             const symbol = document.getElementById('backtestSymbol')?.value || 'nifty';
-            const days = document.getElementById('backtestDays')?.value || '100';
+            const days = document.getElementById('backtestDays')?.value || 'max';
             const body = document.getElementById('backtestTableBody');
             const note = document.getElementById('backtestNote');
             if (body) body.innerHTML = '<tr><td colspan="13" class="journal-empty">Running backtest...</td></tr>';
@@ -1629,7 +1632,8 @@ function setConnection(connected, message) {
 
             if (note) {
                 const bits = [];
-                if (data.dataSource === 'live_fallback_max_60d') bits.push('Using live data (max ~60 days available — sync to GitHub to build a longer archive).');
+                if (data.dataSource === 'live_fallback_max_60d') bits.push('Using live data (max ~60 days available — sync to GitHub regularly to build a longer archive).');
+                if (data.requestedDays === 'max') bits.push('Mode: MAX — every archived candle was tested.');
                 if (data.dataSource === 'unavailable') bits.push(data.note || 'No data available.');
                 if (data.historyRange) bits.push(`Data range analyzed: ${data.historyRange.from} → ${data.historyRange.to} (${data.daysAnalyzed} days).`);
                 note.textContent = bits.join(' ');
